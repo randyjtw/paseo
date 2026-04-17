@@ -1,6 +1,14 @@
 import { create } from "zustand";
+import type { ProviderSnapshotEntry } from "@server/server/agent/agent-sdk-types";
 import { useSessionStore } from "@/stores/session-store";
 import { queryClient } from "@/query/query-client";
+import {
+  APP_SETTINGS_QUERY_KEY,
+  loadSettingsFromStorage,
+  type AppSettings,
+} from "@/hooks/use-settings";
+import { providersSnapshotQueryKey } from "@/hooks/use-providers-snapshot";
+import { resolveHelperProviderPreferences } from "@/utils/helper-provider-preferences";
 
 const SUCCESS_DISPLAY_MS = 1000;
 
@@ -29,6 +37,19 @@ function resolveClient(serverId: string) {
     throw new Error("Daemon client unavailable");
   }
   return client;
+}
+
+async function resolveStructuredHelperInput(serverId: string) {
+  const settings =
+    queryClient.getQueryData<AppSettings>(APP_SETTINGS_QUERY_KEY) ?? (await loadSettingsFromStorage());
+  const snapshot = queryClient.getQueryData<{ entries?: ProviderSnapshotEntry[] }>(
+    providersSnapshotQueryKey(serverId),
+  );
+
+  return resolveHelperProviderPreferences({
+    entries: snapshot?.entries,
+    savedPreferences: settings.helperProviders,
+  });
 }
 
 function setStatus(
@@ -217,7 +238,8 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
       actionId: "commit",
       run: async () => {
         const client = resolveClient(serverId);
-        const payload = await client.checkoutCommit(cwd, { addAll: true });
+        const helperProviders = await resolveStructuredHelperInput(serverId);
+        const payload = await client.checkoutCommit(cwd, { addAll: true, helperProviders });
         if (payload.error) {
           throw new Error(payload.error.message);
         }
@@ -262,7 +284,8 @@ export const useCheckoutGitActionsStore = create<CheckoutGitActionsStoreState>()
       actionId: "create-pr",
       run: async () => {
         const client = resolveClient(serverId);
-        const payload = await client.checkoutPrCreate(cwd, {});
+        const helperProviders = await resolveStructuredHelperInput(serverId);
+        const payload = await client.checkoutPrCreate(cwd, { helperProviders });
         if (payload.error) {
           throw new Error(payload.error.message);
         }

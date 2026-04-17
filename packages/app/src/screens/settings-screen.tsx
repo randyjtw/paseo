@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type { MutableRefObject, ComponentType } from "react";
 import { View, Text, ScrollView, Alert, Pressable } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
@@ -73,6 +73,7 @@ import { ProviderDiagnosticSheet } from "@/components/provider-diagnostic-sheet"
 import { SpinningRefreshIcon } from "@/components/spinning-refresh-icon";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { buildProviderDefinitions } from "@/utils/provider-definitions";
+import { resolveHelperProviderPreferences } from "@/utils/helper-provider-preferences";
 import { isWeb } from "@/constants/platform";
 
 // ---------------------------------------------------------------------------
@@ -522,13 +523,61 @@ interface ProvidersSectionProps {
 function ProvidersSection({ routeServerId }: ProvidersSectionProps) {
   const { theme } = useUnistyles();
   const isConnected = useHostRuntimeIsConnected(routeServerId);
+  const { settings, updateSettings } = useAppSettings();
   const { entries, isLoading, isRefreshing, refresh } = useProvidersSnapshot(routeServerId);
   const [diagnosticProvider, setDiagnosticProvider] = useState<string | null>(null);
   const providerDefinitions = buildProviderDefinitions(entries);
+  const readyEntries = useMemo(
+    () => (entries ?? []).filter((entry) => entry.status === "ready"),
+    [entries],
+  );
+  const helperProviders = useMemo(
+    () =>
+      resolveHelperProviderPreferences({
+        entries,
+        savedPreferences: settings.helperProviders,
+      }),
+    [entries, settings.helperProviders],
+  );
   const providerRefreshInFlight =
     isRefreshing || (entries?.some((entry) => entry.status === "loading") ?? false);
 
   const hasServer = routeServerId.length > 0;
+
+  const updateHelperProviders = useCallback(
+    async (next: typeof helperProviders) => {
+      await updateSettings({ helperProviders: next });
+    },
+    [updateSettings],
+  );
+
+  const moveHelperProvider = useCallback(
+    (index: number, direction: -1 | 1) => {
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= helperProviders.length) {
+        return;
+      }
+
+      const next = [...helperProviders];
+      const [moved] = next.splice(index, 1);
+      if (!moved) {
+        return;
+      }
+      next.splice(targetIndex, 0, moved);
+      void updateHelperProviders(next);
+    },
+    [helperProviders, updateHelperProviders],
+  );
+
+  const setHelperProviderModel = useCallback(
+    (provider: string, model: string | null) => {
+      const next = helperProviders.map((entry) =>
+        entry.provider === provider ? { ...entry, model } : entry,
+      );
+      void updateHelperProviders(next);
+    },
+    [helperProviders, updateHelperProviders],
+  );
 
   return (
     <>
@@ -568,63 +617,179 @@ function ProvidersSection({ routeServerId }: ProvidersSectionProps) {
             <Text style={styles.emptyText}>Loading...</Text>
           </View>
         ) : (
-          <View style={[settingsStyles.card, styles.audioCard]}>
-            {providerDefinitions.map((def) => {
-              const entry = entries?.find((e) => e.provider === def.id);
-              const status = entry?.status ?? "unavailable";
-              const ProviderIcon = getProviderIcon(def.id);
-              const providerError =
-                status === "error" &&
-                typeof entry?.error === "string" &&
-                entry.error.trim().length > 0
-                  ? entry.error.trim()
-                  : null;
+          <>
+            <View style={[settingsStyles.card, styles.audioCard]}>
+              {providerDefinitions.map((def) => {
+                const entry = entries?.find((e) => e.provider === def.id);
+                const status = entry?.status ?? "unavailable";
+                const ProviderIcon = getProviderIcon(def.id);
+                const providerError =
+                  status === "error" &&
+                  typeof entry?.error === "string" &&
+                  entry.error.trim().length > 0
+                    ? entry.error.trim()
+                    : null;
 
-              const modelCount = entry?.models?.length ?? 0;
+                const modelCount = entry?.models?.length ?? 0;
 
-              return (
-                <Pressable
-                  key={def.id}
-                  style={styles.audioRow}
-                  onPress={() => setDiagnosticProvider(def.id)}
-                  accessibilityRole="button"
-                >
-                  <View style={styles.audioRowContent}>
-                    <View
-                      style={{ flexDirection: "row", alignItems: "center", gap: theme.spacing[2] }}
-                    >
-                      <ProviderIcon size={theme.iconSize.sm} color={theme.colors.foreground} />
-                      <Text style={styles.audioRowTitle}>{def.label}</Text>
+                return (
+                  <Pressable
+                    key={def.id}
+                    style={styles.audioRow}
+                    onPress={() => setDiagnosticProvider(def.id)}
+                    accessibilityRole="button"
+                  >
+                    <View style={styles.audioRowContent}>
+                      <View
+                        style={{ flexDirection: "row", alignItems: "center", gap: theme.spacing[2] }}
+                      >
+                        <ProviderIcon size={theme.iconSize.sm} color={theme.colors.foreground} />
+                        <Text style={styles.audioRowTitle}>{def.label}</Text>
+                      </View>
+                      {providerError ? (
+                        <Text style={styles.aboutErrorText} numberOfLines={3}>
+                          {providerError}
+                        </Text>
+                      ) : null}
+                      {status === "ready" && modelCount > 0 ? (
+                        <Text style={styles.audioRowSubtitle}>
+                          {modelCount === 1 ? "1 model" : `${modelCount} models`}
+                        </Text>
+                      ) : null}
                     </View>
-                    {providerError ? (
-                      <Text style={styles.aboutErrorText} numberOfLines={3}>
-                        {providerError}
-                      </Text>
-                    ) : null}
-                    {status === "ready" && modelCount > 0 ? (
-                      <Text style={styles.audioRowSubtitle}>
-                        {modelCount === 1 ? "1 model" : `${modelCount} models`}
-                      </Text>
-                    ) : null}
+                    <StatusBadge
+                      label={
+                        status === "ready"
+                          ? "Available"
+                          : status === "error"
+                            ? "Error"
+                            : status === "loading"
+                              ? "Loading..."
+                              : "Not installed"
+                      }
+                      variant={
+                        status === "ready" ? "success" : status === "error" ? "error" : "muted"
+                      }
+                    />
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View style={[settingsStyles.card, styles.audioCard, styles.helperCard]}>
+              <View style={styles.helperSectionHeader}>
+                <Text style={styles.audioRowTitle}>Helper</Text>
+                <Text style={styles.audioRowSubtitle}>
+                  Structured helper providers for commit messages and PR text. Only providers that
+                  are available above appear here.
+                </Text>
+              </View>
+
+              {helperProviders.length === 0 ? (
+                <View style={[styles.audioRow, styles.audioRowBorder]}>
+                  <View style={styles.audioRowContent}>
+                    <Text style={styles.audioRowTitle}>No helper providers available</Text>
+                    <Text style={styles.audioRowSubtitle}>
+                      Install or enable a provider above to configure helper order and models.
+                    </Text>
                   </View>
-                  <StatusBadge
-                    label={
-                      status === "ready"
-                        ? "Available"
-                        : status === "error"
-                          ? "Error"
-                          : status === "loading"
-                            ? "Loading..."
-                            : "Not installed"
-                    }
-                    variant={
-                      status === "ready" ? "success" : status === "error" ? "error" : "muted"
-                    }
-                  />
-                </Pressable>
-              );
-            })}
-          </View>
+                </View>
+              ) : (
+                helperProviders.map((helper, index) => {
+                  const entry = readyEntries.find((candidate) => candidate.provider === helper.provider);
+                  const ProviderIcon = getProviderIcon(helper.provider);
+                  const selectedModel =
+                    entry?.models?.find((candidate) => candidate.id === helper.model) ?? null;
+                  const helperModelLabel = selectedModel?.label ?? "Default helper model";
+
+                  return (
+                    <View
+                      key={helper.provider}
+                      style={[styles.audioRow, index > 0 ? styles.audioRowBorder : null]}
+                    >
+                      <View style={styles.audioRowContent}>
+                        <View
+                          style={{ flexDirection: "row", alignItems: "center", gap: theme.spacing[2] }}
+                        >
+                          <ProviderIcon size={theme.iconSize.sm} color={theme.colors.foreground} />
+                          <Text style={styles.audioRowTitle}>
+                            {entry?.label ?? helper.provider}
+                          </Text>
+                        </View>
+                        <Text style={styles.audioRowSubtitle}>
+                          Model: {helperModelLabel}
+                        </Text>
+                      </View>
+
+                      <View style={styles.helperControls}>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger
+                            style={({ pressed }) => [
+                              styles.helperModelTrigger,
+                              pressed && { opacity: 0.85 },
+                            ]}
+                          >
+                            <Text style={styles.helperModelTriggerText}>{helperModelLabel}</Text>
+                            <ChevronDown
+                              size={theme.iconSize.sm}
+                              color={theme.colors.foregroundMuted}
+                            />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent side="bottom" align="end" width={260}>
+                            <DropdownMenuItem
+                              selected={!helper.model}
+                              onSelect={() => setHelperProviderModel(helper.provider, null)}
+                            >
+                              Default helper model
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            {(entry?.models ?? []).map((model) => (
+                              <DropdownMenuItem
+                                key={model.id}
+                                selected={helper.model === model.id}
+                                onSelect={() => setHelperProviderModel(helper.provider, model.id)}
+                              >
+                                {model.label}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+
+                        <View style={styles.helperMoveButtons}>
+                          <Pressable
+                            disabled={index === 0}
+                            onPress={() => moveHelperProvider(index, -1)}
+                            style={({ pressed }) => [
+                              styles.helperMoveButton,
+                              index === 0 ? styles.helperMoveButtonDisabled : null,
+                              pressed && index !== 0 ? styles.helperMoveButtonPressed : null,
+                            ]}
+                          >
+                            <Text style={styles.helperMoveButtonText}>Up</Text>
+                          </Pressable>
+                          <Pressable
+                            disabled={index === helperProviders.length - 1}
+                            onPress={() => moveHelperProvider(index, 1)}
+                            style={({ pressed }) => [
+                              styles.helperMoveButton,
+                              index === helperProviders.length - 1
+                                ? styles.helperMoveButtonDisabled
+                                : null,
+                              pressed && index !== helperProviders.length - 1
+                                ? styles.helperMoveButtonPressed
+                                : null,
+                            ]}
+                          >
+                            <Text style={styles.helperMoveButtonText}>Dn</Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </View>
+          </>
         )}
       </View>
 
@@ -1976,6 +2141,62 @@ const styles = StyleSheet.create((theme) => ({
   },
   providerRefreshButtonDisabled: {
     opacity: 0.5,
+  },
+  helperCard: {
+    marginTop: theme.spacing[3],
+  },
+  helperSectionHeader: {
+    paddingHorizontal: theme.spacing[4],
+    paddingTop: theme.spacing[4],
+    paddingBottom: theme.spacing[2],
+    gap: theme.spacing[1],
+  },
+  helperControls: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+  },
+  helperModelTrigger: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    paddingVertical: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    maxWidth: 220,
+  },
+  helperModelTriggerText: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    flexShrink: 1,
+  },
+  helperMoveButtons: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  helperMoveButton: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+  },
+  helperMoveButtonDisabled: {
+    opacity: 0.4,
+  },
+  helperMoveButtonPressed: {
+    backgroundColor: theme.colors.surface2,
+  },
+  helperMoveButtonText: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.base,
+    lineHeight: 16,
   },
   // Audio settings card
   audioCard: {

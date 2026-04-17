@@ -4,9 +4,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 export const APP_SETTINGS_KEY = "@paseo:app-settings";
 const LEGACY_SETTINGS_KEY = "@paseo:settings";
-const APP_SETTINGS_QUERY_KEY = ["app-settings"];
+export const APP_SETTINGS_QUERY_KEY = ["app-settings"];
 
 import { THEME_TO_UNISTYLES, type ThemeName } from "@/styles/theme";
+import {
+  normalizeHelperProviderPreferences,
+  type HelperProviderPreference,
+} from "@/utils/helper-provider-preferences";
 
 export type SendBehavior = "interrupt" | "queue";
 
@@ -16,12 +20,14 @@ export interface AppSettings {
   theme: ThemeName | "auto";
   manageBuiltInDaemon: boolean;
   sendBehavior: SendBehavior;
+  helperProviders: HelperProviderPreference[];
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   theme: "auto",
   manageBuiltInDaemon: true,
   sendBehavior: "interrupt",
+  helperProviders: [],
 };
 
 export interface UseAppSettingsReturn {
@@ -85,6 +91,7 @@ export async function loadSettingsFromStorage(): Promise<AppSettings> {
       if (parsed.theme && !VALID_THEMES.has(parsed.theme)) {
         parsed.theme = DEFAULT_APP_SETTINGS.theme;
       }
+      parsed.helperProviders = normalizeHelperProviderPreferences(parsed.helperProviders);
       return { ...DEFAULT_APP_SETTINGS, ...parsed };
     }
 
