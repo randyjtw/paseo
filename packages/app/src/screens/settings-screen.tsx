@@ -11,6 +11,8 @@ import {
   Moon,
   Monitor,
   ChevronDown,
+  ArrowUp,
+  ArrowDown,
   Globe,
   Settings,
   RotateCw,
@@ -26,6 +28,7 @@ import {
 } from "lucide-react-native";
 import { useAppSettings, type AppSettings, type SendBehavior } from "@/hooks/use-settings";
 import { THEME_SWATCHES, type ThemeName } from "@/styles/theme";
+import { DraggableList, type DraggableRenderItemInfo } from "@/components/draggable-list";
 import type { HostProfile, HostConnection } from "@/types/host-connection";
 import { useHosts, useHostMutations } from "@/runtime/host-runtime";
 import { formatConnectionStatus, getConnectionStatusTone } from "@/utils/daemons";
@@ -73,7 +76,10 @@ import { ProviderDiagnosticSheet } from "@/components/provider-diagnostic-sheet"
 import { SpinningRefreshIcon } from "@/components/spinning-refresh-icon";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { buildProviderDefinitions } from "@/utils/provider-definitions";
-import { resolveHelperProviderPreferences } from "@/utils/helper-provider-preferences";
+import {
+  resolveHelperProviderPreferences,
+  type HelperProviderPreference,
+} from "@/utils/helper-provider-preferences";
 import { isWeb } from "@/constants/platform";
 
 // ---------------------------------------------------------------------------
@@ -579,6 +585,108 @@ function ProvidersSection({ routeServerId }: ProvidersSectionProps) {
     [helperProviders, updateHelperProviders],
   );
 
+  const renderHelperProvider = useCallback(
+    ({ item: helper, index, drag, dragHandleProps }: DraggableRenderItemInfo<HelperProviderPreference>) => {
+      const entry = readyEntries.find((candidate) => candidate.provider === helper.provider);
+      const ProviderIcon = getProviderIcon(helper.provider);
+      const selectedModel =
+        entry?.models?.find((candidate) => candidate.id === helper.model) ?? null;
+      const helperModelLabel = selectedModel?.label ?? "Default helper model";
+
+      return (
+        <View style={[styles.audioRow, index > 0 ? styles.audioRowBorder : null]}>
+          <View style={styles.audioRowContent}>
+            <View
+              style={{ flexDirection: "row", alignItems: "center", gap: theme.spacing[2] }}
+            >
+              <Pressable
+                {...(dragHandleProps?.attributes as any)}
+                {...(dragHandleProps?.listeners as any)}
+                ref={dragHandleProps?.setActivatorNodeRef as any}
+                onLongPress={drag}
+                delayLongPress={150}
+                style={({ pressed }) => [
+                  styles.helperDragHandle,
+                  pressed ? styles.helperMoveButtonPressed : null,
+                ]}
+              >
+                <Text style={styles.helperDragHandleText}>⋮⋮</Text>
+              </Pressable>
+              <ProviderIcon size={theme.iconSize.sm} color={theme.colors.foreground} />
+              <Text style={styles.audioRowTitle}>{entry?.label ?? helper.provider}</Text>
+            </View>
+            <Text style={styles.audioRowSubtitle}>Model: {helperModelLabel}</Text>
+          </View>
+
+          <View style={styles.helperControls}>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                style={({ pressed }) => [
+                  styles.helperModelTrigger,
+                  pressed && { opacity: 0.85 },
+                ]}
+              >
+                <Text style={styles.helperModelTriggerText}>{helperModelLabel}</Text>
+                <ChevronDown
+                  size={theme.iconSize.sm}
+                  color={theme.colors.foregroundMuted}
+                />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent side="bottom" align="end" width={260}>
+                <DropdownMenuItem
+                  selected={!helper.model}
+                  onSelect={() => setHelperProviderModel(helper.provider, null)}
+                >
+                  Default helper model
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {(entry?.models ?? []).map((model) => (
+                  <DropdownMenuItem
+                    key={model.id}
+                    selected={helper.model === model.id}
+                    onSelect={() => setHelperProviderModel(helper.provider, model.id)}
+                  >
+                    {model.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <View style={styles.helperMoveButtons}>
+              <Pressable
+                disabled={index === 0}
+                onPress={() => moveHelperProvider(index, -1)}
+                style={({ pressed }) => [
+                  styles.helperMoveButton,
+                  index === 0 ? styles.helperMoveButtonDisabled : null,
+                  pressed && index !== 0 ? styles.helperMoveButtonPressed : null,
+                ]}
+              >
+                <ArrowUp size={theme.iconSize.sm} color={theme.colors.foreground} />
+              </Pressable>
+              <Pressable
+                disabled={index === helperProviders.length - 1}
+                onPress={() => moveHelperProvider(index, 1)}
+                style={({ pressed }) => [
+                  styles.helperMoveButton,
+                  index === helperProviders.length - 1
+                    ? styles.helperMoveButtonDisabled
+                    : null,
+                  pressed && index !== helperProviders.length - 1
+                    ? styles.helperMoveButtonPressed
+                    : null,
+                ]}
+              >
+                <ArrowDown size={theme.iconSize.sm} color={theme.colors.foreground} />
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      );
+    },
+    [helperProviders.length, moveHelperProvider, readyEntries, setHelperProviderModel, theme],
+  );
+
   return (
     <>
       <View style={settingsStyles.section}>
@@ -695,98 +803,17 @@ function ProvidersSection({ routeServerId }: ProvidersSectionProps) {
                   </View>
                 </View>
               ) : (
-                helperProviders.map((helper, index) => {
-                  const entry = readyEntries.find((candidate) => candidate.provider === helper.provider);
-                  const ProviderIcon = getProviderIcon(helper.provider);
-                  const selectedModel =
-                    entry?.models?.find((candidate) => candidate.id === helper.model) ?? null;
-                  const helperModelLabel = selectedModel?.label ?? "Default helper model";
-
-                  return (
-                    <View
-                      key={helper.provider}
-                      style={[styles.audioRow, index > 0 ? styles.audioRowBorder : null]}
-                    >
-                      <View style={styles.audioRowContent}>
-                        <View
-                          style={{ flexDirection: "row", alignItems: "center", gap: theme.spacing[2] }}
-                        >
-                          <ProviderIcon size={theme.iconSize.sm} color={theme.colors.foreground} />
-                          <Text style={styles.audioRowTitle}>
-                            {entry?.label ?? helper.provider}
-                          </Text>
-                        </View>
-                        <Text style={styles.audioRowSubtitle}>
-                          Model: {helperModelLabel}
-                        </Text>
-                      </View>
-
-                      <View style={styles.helperControls}>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger
-                            style={({ pressed }) => [
-                              styles.helperModelTrigger,
-                              pressed && { opacity: 0.85 },
-                            ]}
-                          >
-                            <Text style={styles.helperModelTriggerText}>{helperModelLabel}</Text>
-                            <ChevronDown
-                              size={theme.iconSize.sm}
-                              color={theme.colors.foregroundMuted}
-                            />
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent side="bottom" align="end" width={260}>
-                            <DropdownMenuItem
-                              selected={!helper.model}
-                              onSelect={() => setHelperProviderModel(helper.provider, null)}
-                            >
-                              Default helper model
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            {(entry?.models ?? []).map((model) => (
-                              <DropdownMenuItem
-                                key={model.id}
-                                selected={helper.model === model.id}
-                                onSelect={() => setHelperProviderModel(helper.provider, model.id)}
-                              >
-                                {model.label}
-                              </DropdownMenuItem>
-                            ))}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-
-                        <View style={styles.helperMoveButtons}>
-                          <Pressable
-                            disabled={index === 0}
-                            onPress={() => moveHelperProvider(index, -1)}
-                            style={({ pressed }) => [
-                              styles.helperMoveButton,
-                              index === 0 ? styles.helperMoveButtonDisabled : null,
-                              pressed && index !== 0 ? styles.helperMoveButtonPressed : null,
-                            ]}
-                          >
-                            <Text style={styles.helperMoveButtonText}>Up</Text>
-                          </Pressable>
-                          <Pressable
-                            disabled={index === helperProviders.length - 1}
-                            onPress={() => moveHelperProvider(index, 1)}
-                            style={({ pressed }) => [
-                              styles.helperMoveButton,
-                              index === helperProviders.length - 1
-                                ? styles.helperMoveButtonDisabled
-                                : null,
-                              pressed && index !== helperProviders.length - 1
-                                ? styles.helperMoveButtonPressed
-                                : null,
-                            ]}
-                          >
-                            <Text style={styles.helperMoveButtonText}>Dn</Text>
-                          </Pressable>
-                        </View>
-                      </View>
-                    </View>
-                  );
-                })
+                <DraggableList
+                  data={helperProviders}
+                  keyExtractor={(item) => item.provider}
+                  renderItem={renderHelperProvider}
+                  onDragEnd={(next) => {
+                    void updateHelperProviders(next);
+                  }}
+                  scrollEnabled={false}
+                  useDragHandle
+                  containerStyle={styles.helperListContainer}
+                />
               )}
             </View>
           </>
@@ -2156,6 +2183,25 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[2],
   },
+  helperListContainer: {
+    width: "100%",
+  },
+  helperDragHandle: {
+    width: 28,
+    height: 28,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+  },
+  helperDragHandleText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    lineHeight: 14,
+    letterSpacing: -1,
+  },
   helperModelTrigger: {
     flexDirection: "row",
     alignItems: "center",
@@ -2192,11 +2238,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   helperMoveButtonPressed: {
     backgroundColor: theme.colors.surface2,
-  },
-  helperMoveButtonText: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.base,
-    lineHeight: 16,
   },
   // Audio settings card
   audioCard: {
