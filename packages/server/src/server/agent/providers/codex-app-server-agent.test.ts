@@ -616,6 +616,64 @@ describe("Codex app-server provider", () => {
     });
   });
 
+  test("marks Codex auth reload as pending when auth/config snapshot changes", async () => {
+    const session = createSession();
+    const readSnapshot = vi
+      .fn()
+      .mockResolvedValueOnce({
+        auth: { exists: true, mtimeMs: 1000, size: 128 },
+        config: { exists: true, mtimeMs: 1000, size: 256 },
+      })
+      .mockResolvedValueOnce({
+        auth: { exists: true, mtimeMs: 2000, size: 128 },
+        config: { exists: true, mtimeMs: 1000, size: 256 },
+      });
+    (session as any).readCodexAuthConfigSnapshot = readSnapshot;
+
+    await (session as any).refreshCodexAuthReloadState();
+    expect((session as any).codexAuthReloadPending).toBe(false);
+
+    await (session as any).refreshCodexAuthReloadState();
+    expect((session as any).codexAuthReloadPending).toBe(true);
+  });
+
+  test("reloads Codex connection immediately when auth/config changed and no turn is active", async () => {
+    const session = createSession();
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    session.client = { dispose } as any;
+    session.connected = true;
+    session.currentThreadId = "thread-123";
+    session.currentTurnId = "turn-123";
+    session.activeForegroundTurnId = null;
+    session.codexAuthReloadPending = true;
+    (session as any).refreshCodexAuthReloadState = vi.fn().mockResolvedValue(undefined);
+
+    await (session as any).maybeReloadForCodexAuthChange();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(session.client).toBeNull();
+    expect(session.connected).toBe(false);
+    expect(session.currentThreadId).toBeNull();
+    expect(session.currentTurnId).toBeNull();
+    expect((session as any).codexAuthReloadPending).toBe(false);
+  });
+
+  test("defers Codex reconnect while a foreground turn is active", async () => {
+    const session = createSession();
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    session.client = { dispose } as any;
+    session.connected = true;
+    session.codexAuthReloadPending = true;
+    session.activeForegroundTurnId = "active-turn";
+    (session as any).refreshCodexAuthReloadState = vi.fn().mockResolvedValue(undefined);
+
+    await (session as any).maybeReloadForCodexAuthChange();
+
+    expect(dispose).not.toHaveBeenCalled();
+    expect(session.connected).toBe(true);
+    expect((session as any).codexAuthReloadPending).toBe(true);
+  });
+
   test("approving a synthetic Codex plan permission disables plan and fast mode and returns follow-up prompt", async () => {
     const session = createSession({
       featureValues: { plan_mode: true, fast_mode: true },
