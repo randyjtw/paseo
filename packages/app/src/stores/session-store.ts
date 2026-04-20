@@ -238,6 +238,14 @@ export interface AgentTimelineCursorState {
   endSeq: number;
 }
 
+export interface AgentAutoNextSettings {
+  enabled: boolean;
+  message: string;
+  autoDecisionEnabled: boolean;
+  cooldownMs: number;
+  lastSentAt: number | null;
+}
+
 // Per-session state
 export interface SessionState {
   serverId: string;
@@ -288,6 +296,9 @@ export interface SessionState {
     string,
     Array<{ id: string; text: string; attachments: ComposerAttachment[] }>
   >;
+
+  // Auto-next settings
+  autoNextByAgent: Map<string, AgentAutoNextSettings>;
 }
 
 // Global store state
@@ -408,6 +419,14 @@ interface SessionStoreActions {
           prev: Map<string, Array<{ id: string; text: string; attachments: ComposerAttachment[] }>>,
         ) => Map<string, Array<{ id: string; text: string; attachments: ComposerAttachment[] }>>),
   ) => void;
+  setAgentAutoNext: (
+    serverId: string,
+    agentId: string,
+    value:
+      | AgentAutoNextSettings
+      | Partial<AgentAutoNextSettings>
+      | ((prev: AgentAutoNextSettings) => AgentAutoNextSettings),
+  ) => void;
 
   // Hydration
   setHasHydratedAgents: (serverId: string, hydrated: boolean) => void;
@@ -445,6 +464,7 @@ function createInitialSessionState(serverId: string, client: DaemonClient): Sess
     pendingPermissions: new Map(),
     fileExplorer: new Map(),
     queuedMessages: new Map(),
+    autoNextByAgent: new Map(),
   };
 }
 
@@ -1126,6 +1146,50 @@ export const useSessionStore = create<SessionStore>()(
             sessions: {
               ...prev.sessions,
               [serverId]: { ...session, queuedMessages: nextValue },
+            },
+          };
+        });
+      },
+
+      setAgentAutoNext: (serverId, agentId, value) => {
+        set((prev) => {
+          const session = prev.sessions[serverId];
+          if (!session) {
+            return prev;
+          }
+
+          const current =
+            session.autoNextByAgent.get(agentId) ?? {
+              enabled: false,
+              message: "\u4e0b\u4e00\u6b65",
+              autoDecisionEnabled: false,
+              cooldownMs: 3_000,
+              lastSentAt: null,
+            };
+          const nextValue =
+            typeof value === "function" ? value(current) : { ...current, ...value };
+
+          if (
+            current.enabled === nextValue.enabled &&
+            current.message === nextValue.message &&
+            current.autoDecisionEnabled === nextValue.autoDecisionEnabled &&
+            current.cooldownMs === nextValue.cooldownMs &&
+            current.lastSentAt === nextValue.lastSentAt
+          ) {
+            return prev;
+          }
+
+          const nextAutoNextByAgent = new Map(session.autoNextByAgent);
+          nextAutoNextByAgent.set(agentId, nextValue);
+
+          return {
+            ...prev,
+            sessions: {
+              ...prev.sessions,
+              [serverId]: {
+                ...session,
+                autoNextByAgent: nextAutoNextByAgent,
+              },
             },
           };
         });

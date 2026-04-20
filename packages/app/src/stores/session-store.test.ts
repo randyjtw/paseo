@@ -235,6 +235,43 @@ describe("setWorkspaces", () => {
   });
 });
 
+describe("setAgentAutoNext", () => {
+  it("creates default settings and merges updates for an agent", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+
+    store.setAgentAutoNext("test-server", "agent-1", { enabled: true });
+    store.setAgentAutoNext("test-server", "agent-1", {
+      autoDecisionEnabled: true,
+      cooldownMs: 5_000,
+    });
+
+    expect(store.getSession("test-server")?.autoNextByAgent.get("agent-1")).toEqual({
+      enabled: true,
+      message: "\u4e0b\u4e00\u6b65",
+      autoDecisionEnabled: true,
+      cooldownMs: 5_000,
+      lastSentAt: null,
+    });
+  });
+
+  it("preserves identity when the next settings are unchanged", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+    store.setAgentAutoNext("test-server", "agent-1", { enabled: true });
+
+    const before = getTestSessionReferences();
+    const beforeAutoNext = before.session.autoNextByAgent;
+
+    store.setAgentAutoNext("test-server", "agent-1", { enabled: true });
+
+    const after = getTestSessionReferences();
+    expect(after.sessions).toBe(before.sessions);
+    expect(after.session).toBe(before.session);
+    expect(after.session.autoNextByAgent).toBe(beforeAutoNext);
+  });
+});
+
 describe("removeWorkspace", () => {
   it("preserves identity when removing a missing workspace", () => {
     const store = useSessionStore.getState();

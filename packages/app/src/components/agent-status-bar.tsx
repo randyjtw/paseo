@@ -1,5 +1,5 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
-import { View, Text, Pressable, Keyboard } from "react-native";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { View, Text, Pressable, Keyboard, TextInput } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
 import { useStoreWithEqualityFn } from "zustand/traditional";
@@ -7,6 +7,8 @@ import {
   Brain,
   ChevronDown,
   ListTodo,
+  Pause,
+  Play,
   Settings2,
   ShieldAlert,
   ShieldCheck,
@@ -15,7 +17,7 @@ import {
 } from "lucide-react-native";
 import { getProviderIcon } from "@/components/provider-icons";
 import { CombinedModelSelector } from "@/components/combined-model-selector";
-import { useSessionStore } from "@/stores/session-store";
+import { useSessionStore, type AgentAutoNextSettings } from "@/stores/session-store";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { resolveProviderDefinition } from "@/utils/provider-definitions";
 import {
@@ -54,6 +56,7 @@ import {
 import { isWeb as platformIsWeb } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
 import { toErrorMessage } from "@/utils/error-messages";
+import { AUTO_NEXT_DEFAULT_MESSAGE } from "@/utils/auto-next";
 
 type StatusOption = {
   id: string;
@@ -118,6 +121,26 @@ interface AgentStatusBarProps {
   agentId: string;
   serverId: string;
   onDropdownClose?: () => void;
+}
+
+type AgentAutoNextControlProps = {
+  settings: AgentAutoNextSettings;
+  disabled?: boolean;
+  onChange: (updates: Partial<AgentAutoNextSettings>) => void;
+};
+
+const DEFAULT_AUTO_NEXT_SETTINGS: AgentAutoNextSettings = {
+  enabled: false,
+  message: AUTO_NEXT_DEFAULT_MESSAGE,
+  autoDecisionEnabled: false,
+  cooldownMs: 3_000,
+  lastSentAt: null,
+};
+
+const AUTO_NEXT_COOLDOWN_OPTIONS = [1_000, 3_000, 5_000, 10_000];
+
+function formatCooldownLabel(cooldownMs: number): string {
+  return `${Math.max(1, Math.round(cooldownMs / 1000))}s`;
 }
 
 function findOptionLabel(
@@ -833,6 +856,148 @@ function ControlledStatusBar({
   );
 }
 
+function AgentAutoNextControl({ settings, disabled = false, onChange }: AgentAutoNextControlProps) {
+  const { theme } = useUnistyles();
+  const [isOpen, setIsOpen] = useState(false);
+  const [draftMessage, setDraftMessage] = useState(settings.message);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setDraftMessage(settings.message);
+    }
+  }, [isOpen, settings.message]);
+
+  const commitMessage = useCallback(() => {
+    const nextMessage = draftMessage.trim() || AUTO_NEXT_DEFAULT_MESSAGE;
+    setDraftMessage(nextMessage);
+    if (nextMessage !== settings.message) {
+      onChange({ message: nextMessage });
+    }
+  }, [draftMessage, onChange, settings.message]);
+
+  return (
+    <>
+      <Pressable
+        disabled={disabled}
+        onPress={() => setIsOpen(true)}
+        style={({ pressed, hovered }) => [
+          styles.modeBadge,
+          hovered && styles.modeBadgeHovered,
+          pressed && styles.modeBadgePressed,
+          disabled && styles.disabledBadge,
+          settings.enabled && styles.autoNextButtonEnabled,
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel="Auto-next settings"
+        testID="agent-auto-next-button"
+      >
+        {settings.enabled ? (
+          <Play size={theme.iconSize.sm} color={theme.colors.palette.green[500]} />
+        ) : (
+          <Pause size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
+        )}
+        <Text style={styles.modeBadgeText}>
+          {settings.enabled ? "Auto-next on" : "Auto-next off"}
+        </Text>
+      </Pressable>
+
+      <AdaptiveModalSheet
+        title="Auto-next"
+        visible={isOpen}
+        onClose={() => {
+          commitMessage();
+          setIsOpen(false);
+        }}
+        testID="agent-auto-next-sheet"
+      >
+        <View style={styles.sheetSection}>
+          <Pressable
+            disabled={disabled}
+            onPress={() => onChange({ enabled: !settings.enabled })}
+            style={({ pressed }) => [
+              styles.sheetSelect,
+              pressed && styles.sheetSelectPressed,
+              disabled && styles.disabledSheetSelect,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Toggle auto-next"
+            testID="agent-auto-next-enabled"
+          >
+            <Text style={styles.sheetSelectText}>Auto-next</Text>
+            <Text style={styles.sheetValueText}>{settings.enabled ? "On" : "Off"}</Text>
+          </Pressable>
+
+          <View style={styles.autoNextField}>
+            <Text style={styles.autoNextFieldLabel}>Follow-up message</Text>
+            <TextInput
+              value={draftMessage}
+              editable={!disabled}
+              onChangeText={setDraftMessage}
+              onBlur={commitMessage}
+              placeholder={AUTO_NEXT_DEFAULT_MESSAGE}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={[styles.autoNextInput, disabled && styles.disabledSheetSelect]}
+              testID="agent-auto-next-message"
+            />
+          </View>
+
+          <Pressable
+            disabled={disabled}
+            onPress={() => onChange({ autoDecisionEnabled: !settings.autoDecisionEnabled })}
+            style={({ pressed }) => [
+              styles.sheetSelect,
+              pressed && styles.sheetSelectPressed,
+              disabled && styles.disabledSheetSelect,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Toggle auto decision"
+            testID="agent-auto-next-auto-decision"
+          >
+            <Text style={styles.sheetSelectText}>Auto decision on choice status</Text>
+            <Text style={styles.sheetValueText}>
+              {settings.autoDecisionEnabled ? "On" : "Off"}
+            </Text>
+          </Pressable>
+
+          <View style={styles.autoNextField}>
+            <Text style={styles.autoNextFieldLabel}>Cooldown</Text>
+            <View style={styles.autoNextCooldownRow}>
+              {AUTO_NEXT_COOLDOWN_OPTIONS.map((cooldownMs) => {
+                const selected = settings.cooldownMs === cooldownMs;
+                return (
+                  <Pressable
+                    key={cooldownMs}
+                    disabled={disabled}
+                    onPress={() => onChange({ cooldownMs })}
+                    style={({ pressed }) => [
+                      styles.autoNextCooldownOption,
+                      selected && styles.autoNextCooldownOptionSelected,
+                      pressed && styles.modeBadgePressed,
+                      disabled && styles.disabledBadge,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Set cooldown to ${formatCooldownLabel(cooldownMs)}`}
+                    testID={`agent-auto-next-cooldown-${cooldownMs}`}
+                  >
+                    <Text
+                      style={[
+                        styles.autoNextCooldownText,
+                        selected && styles.autoNextCooldownTextSelected,
+                      ]}
+                    >
+                      {formatCooldownLabel(cooldownMs)}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        </View>
+      </AdaptiveModalSheet>
+    </>
+  );
+}
+
 const EMPTY_MODES: AgentMode[] = [];
 
 export const AgentStatusBar = memo(function AgentStatusBar({
@@ -864,6 +1029,10 @@ export const AgentStatusBar = memo(function AgentStatusBar({
     (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b),
   );
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
+  const autoNext = useSessionStore(
+    (state) => state.sessions[serverId]?.autoNextByAgent.get(agentId) ?? DEFAULT_AUTO_NEXT_SETTINGS,
+  );
+  const setAgentAutoNext = useSessionStore((state) => state.setAgentAutoNext);
   const toast = useToast();
 
   const {
@@ -939,111 +1108,120 @@ export const AgentStatusBar = memo(function AgentStatusBar({
   }
 
   return (
-    <ControlledStatusBar
-      provider={agent.provider}
-      modeOptions={
-        modeOptions.length > 0
-          ? modeOptions
-          : [{ id: agent.currentModeId ?? "", label: displayMode }]
-      }
-      selectedModeId={agent.currentModeId ?? undefined}
-      providerDefinitions={agentProviderDefinitions}
-      allProviderModels={agentProviderModels}
-      onSelectMode={(modeId) => {
-        if (!client) {
-          return;
+    <View style={styles.container}>
+      <ControlledStatusBar
+        provider={agent.provider}
+        modeOptions={
+          modeOptions.length > 0
+            ? modeOptions
+            : [{ id: agent.currentModeId ?? "", label: displayMode }]
         }
-        void client.setAgentMode(agentId, modeId).catch((error) => {
-          console.warn("[AgentStatusBar] setAgentMode failed", error);
-          toast.error(toErrorMessage(error));
-        });
-      }}
-      modelOptions={modelOptions}
-      selectedModelId={modelSelection.activeModelId ?? undefined}
-      onSelectModel={(modelId) => {
-        if (!client) {
-          return;
-        }
-        void updatePreferences((current) =>
-          mergeProviderPreferences({
-            preferences: current,
-            provider: agent.provider,
-            updates: {
-              model: modelId,
-            },
-          }),
-        ).catch((error) => {
-          console.warn("[AgentStatusBar] persist model preference failed", error);
-        });
-        void client.setAgentModel(agentId, modelId).catch((error) => {
-          console.warn("[AgentStatusBar] setAgentModel failed", error);
-          toast.error(toErrorMessage(error));
-        });
-      }}
-      favoriteKeys={favoriteKeys}
-      onToggleFavoriteModel={(provider, modelId) => {
-        void updatePreferences((current) =>
-          toggleFavoriteModel({ preferences: current, provider, modelId }),
-        ).catch((error) => {
-          console.warn("[AgentStatusBar] toggle favorite model failed", error);
-        });
-      }}
-      thinkingOptions={thinkingOptions.length > 1 ? thinkingOptions : undefined}
-      selectedThinkingOptionId={modelSelection.selectedThinkingId ?? undefined}
-      onSelectThinkingOption={(thinkingOptionId) => {
-        if (!client) {
-          return;
-        }
-        const activeModelId = modelSelection.activeModelId;
-        if (activeModelId) {
+        selectedModeId={agent.currentModeId ?? undefined}
+        providerDefinitions={agentProviderDefinitions}
+        allProviderModels={agentProviderModels}
+        onSelectMode={(modeId) => {
+          if (!client) {
+            return;
+          }
+          void client.setAgentMode(agentId, modeId).catch((error) => {
+            console.warn("[AgentStatusBar] setAgentMode failed", error);
+            toast.error(toErrorMessage(error));
+          });
+        }}
+        modelOptions={modelOptions}
+        selectedModelId={modelSelection.activeModelId ?? undefined}
+        onSelectModel={(modelId) => {
+          if (!client) {
+            return;
+          }
           void updatePreferences((current) =>
             mergeProviderPreferences({
               preferences: current,
               provider: agent.provider,
               updates: {
-                model: activeModelId,
-                thinkingByModel: {
-                  [activeModelId]: thinkingOptionId,
+                model: modelId,
+              },
+            }),
+          ).catch((error) => {
+            console.warn("[AgentStatusBar] persist model preference failed", error);
+          });
+          void client.setAgentModel(agentId, modelId).catch((error) => {
+            console.warn("[AgentStatusBar] setAgentModel failed", error);
+            toast.error(toErrorMessage(error));
+          });
+        }}
+        favoriteKeys={favoriteKeys}
+        onToggleFavoriteModel={(provider, modelId) => {
+          void updatePreferences((current) =>
+            toggleFavoriteModel({ preferences: current, provider, modelId }),
+          ).catch((error) => {
+            console.warn("[AgentStatusBar] toggle favorite model failed", error);
+          });
+        }}
+        thinkingOptions={thinkingOptions.length > 1 ? thinkingOptions : undefined}
+        selectedThinkingOptionId={modelSelection.selectedThinkingId ?? undefined}
+        onSelectThinkingOption={(thinkingOptionId) => {
+          if (!client) {
+            return;
+          }
+          const activeModelId = modelSelection.activeModelId;
+          if (activeModelId) {
+            void updatePreferences((current) =>
+              mergeProviderPreferences({
+                preferences: current,
+                provider: agent.provider,
+                updates: {
+                  model: activeModelId,
+                  thinkingByModel: {
+                    [activeModelId]: thinkingOptionId,
+                  },
+                },
+              }),
+            ).catch((error) => {
+              console.warn("[AgentStatusBar] persist thinking preference failed", error);
+            });
+          }
+          void client.setAgentThinkingOption(agentId, thinkingOptionId).catch((error) => {
+            console.warn("[AgentStatusBar] setAgentThinkingOption failed", error);
+            toast.error(toErrorMessage(error));
+          });
+        }}
+        features={agent.features}
+        onSetFeature={(featureId, value) => {
+          if (!client) {
+            return;
+          }
+          void updatePreferences((current) =>
+            mergeProviderPreferences({
+              preferences: current,
+              provider: agent.provider,
+              updates: {
+                featureValues: {
+                  [featureId]: value,
                 },
               },
             }),
           ).catch((error) => {
-            console.warn("[AgentStatusBar] persist thinking preference failed", error);
+            console.warn("[AgentStatusBar] persist feature preference failed", error);
           });
-        }
-        void client.setAgentThinkingOption(agentId, thinkingOptionId).catch((error) => {
-          console.warn("[AgentStatusBar] setAgentThinkingOption failed", error);
-          toast.error(toErrorMessage(error));
-        });
-      }}
-      features={agent.features}
-      onSetFeature={(featureId, value) => {
-        if (!client) {
-          return;
-        }
-        void updatePreferences((current) =>
-          mergeProviderPreferences({
-            preferences: current,
-            provider: agent.provider,
-            updates: {
-              featureValues: {
-                [featureId]: value,
-              },
-            },
-          }),
-        ).catch((error) => {
-          console.warn("[AgentStatusBar] persist feature preference failed", error);
-        });
-        void client.setAgentFeature(agentId, featureId, value).catch((error) => {
-          console.warn("[AgentStatusBar] setAgentFeature failed", error);
-          toast.error(toErrorMessage(error));
-        });
-      }}
-      isModelLoading={snapshotIsLoading}
-      onModelSelectorOpen={refetchSnapshotIfStale}
-      onDropdownClose={onDropdownClose}
-      disabled={!client}
-    />
+          void client.setAgentFeature(agentId, featureId, value).catch((error) => {
+            console.warn("[AgentStatusBar] setAgentFeature failed", error);
+            toast.error(toErrorMessage(error));
+          });
+        }}
+        isModelLoading={snapshotIsLoading}
+        onModelSelectorOpen={refetchSnapshotIfStale}
+        onDropdownClose={onDropdownClose}
+        disabled={!client}
+      />
+      <AgentAutoNextControl
+        settings={autoNext}
+        disabled={!client}
+        onChange={(updates) => {
+          setAgentAutoNext(serverId, agentId, updates);
+        }}
+      />
+    </View>
   );
 });
 
@@ -1263,5 +1441,59 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.semibold,
+  },
+  sheetValueText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  autoNextButtonEnabled: {
+    backgroundColor: theme.colors.surface2,
+  },
+  autoNextField: {
+    gap: theme.spacing[2],
+  },
+  autoNextFieldLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  autoNextInput: {
+    minHeight: 44,
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.surface2,
+    backgroundColor: theme.colors.surface0,
+    color: theme.colors.foreground,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[3],
+    fontSize: theme.fontSize.base,
+  },
+  autoNextCooldownRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: theme.spacing[2],
+  },
+  autoNextCooldownOption: {
+    minWidth: 52,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.surface0,
+    borderWidth: 1,
+    borderColor: theme.colors.surface2,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  autoNextCooldownOptionSelected: {
+    backgroundColor: theme.colors.surface2,
+  },
+  autoNextCooldownText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  autoNextCooldownTextSelected: {
+    color: theme.colors.foreground,
   },
 }));
