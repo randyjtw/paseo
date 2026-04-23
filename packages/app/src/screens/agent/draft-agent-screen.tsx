@@ -28,7 +28,7 @@ import { shortenPath } from "@/utils/shorten-path";
 import { collectAgentWorkingDirectorySuggestions } from "@/utils/agent-working-directory-suggestions";
 import { buildWorkingDirectorySuggestions } from "@/utils/working-directory-suggestions";
 import { useExplorerOpenGesture } from "@/hooks/use-explorer-open-gesture";
-import { useSessionStore } from "@/stores/session-store";
+import { useSessionStore, type AgentAutoNextSettings } from "@/stores/session-store";
 import { buildDraftStoreKey, generateDraftId } from "@/stores/draft-keys";
 import {
   getHostRuntimeStore,
@@ -61,6 +61,13 @@ import { useDraftAgentFeatures } from "@/hooks/use-draft-agent-features";
 import { isWeb } from "@/constants/platform";
 
 const EMPTY_PENDING_PERMISSIONS = new Map();
+const DEFAULT_DRAFT_AUTO_NEXT_SETTINGS: AgentAutoNextSettings = {
+  enabled: false,
+  message: "下一步",
+  autoDecisionEnabled: false,
+  cooldownMs: 3_000,
+  lastSentAt: null,
+};
 const DRAFT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
   supportsSessionPersistence: false,
@@ -294,6 +301,10 @@ function DraftAgentScreenContent({
   }, []);
   const sessionAgents = useSessionStore((state) =>
     selectedServerId ? state.sessions[selectedServerId]?.agents : undefined,
+  );
+  const setAgentAutoNext = useSessionStore((state) => state.setAgentAutoNext);
+  const [draftAutoNext, setDraftAutoNext] = useState<AgentAutoNextSettings>(
+    DEFAULT_DRAFT_AUTO_NEXT_SETTINGS,
   );
   const { agents: allAgents } = useAllAgentsList({ serverId: selectedServerId });
   const worktreePathLastCreatedAt = useMemo(() => {
@@ -967,6 +978,9 @@ function DraftAgentScreenContent({
       };
     },
     onCreateSuccess: ({ result }) => {
+      if (selectedServerId) {
+        setAgentAutoNext(selectedServerId, result.id, draftAutoNext);
+      }
       if (!result.workspaceId) {
         router.replace(buildHostAgentDetailRoute(selectedServerId as string, result.id) as any);
         return;
@@ -1251,6 +1265,10 @@ function DraftAgentScreenContent({
               commandDraftConfig={commandDraftConfig}
               statusControls={{
                 ...statusControls,
+                autoNextSettings: draftAutoNext,
+                onChangeAutoNext: (updates) => {
+                  setDraftAutoNext((current) => ({ ...current, ...updates }));
+                },
                 disabled: isSubmitting,
               }}
             />
