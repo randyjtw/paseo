@@ -58,6 +58,11 @@ import { patchWorkspaceScripts } from "@/contexts/session-workspace-scripts";
 import { isNative } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
 import { toErrorMessage } from "@/utils/error-messages";
+import {
+  AUTO_NEXT_DEFAULT_MESSAGE,
+  type AutoNextTimelineItem,
+  resolveAutoNextFollowUp,
+} from "@/utils/auto-next";
 
 // Re-export types from session-store and draft-store for backward compatibility
 export type { DraftInput } from "@/stores/draft-store";
@@ -322,6 +327,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   const wasConnectedRef = useRef(isConnected);
   const audioOutputBuffersRef = useRef<Map<string, BufferedAudioChunk[]>>(new Map());
   const activeAudioGroupsRef = useRef<Set<string>>(new Set());
+  const autoNextInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -485,6 +491,75 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
             updated.set(agent.id, rest);
             return updated;
           });
+        } else {
+          const autoNext = session?.autoNextByAgent.get(agent.id);
+          if (autoNext?.enabled && sendAgentMessageRef.current) {
+            if (autoNextInFlightRef.current.has(agent.id)) {
+              previousAgentStatusRef.current.set(agent.id, agent.status);
+              return;
+            }
+
+            autoNextInFlightRef.current.add(agent.id);
+            void (async () => {
+              try {
+                const streamAssistantText = findLatestAssistantMessageText([
+                  ...(session?.agentStreamTail.get(agent.id) ?? []),
+                  ...(session?.agentStreamHead.get(agent.id) ?? []),
+                ]);
+
+                let timelineItems: AutoNextTimelineItem[] | null = null;
+                if (client) {
+                  try {
+                    const response = await client.fetchAgentTimeline(agent.id, {
+                      direction: "tail",
+                      limit: 64,
+                      projection: "canonical",
+                    });
+                    timelineItems = response.entries.flatMap((entry) =>
+                      entry.item?.type === "assistant_message" && typeof entry.item.text === "string"
+                        ? [{ type: "assistant_message", text: entry.item.text }]
+                        : [],
+                    );
+                  } catch (error) {
+                    console.warn(
+                      "[Session] failed to fetch canonical timeline for auto next",
+                      agent.id,
+                      error,
+                    );
+                  }
+                }
+
+                const latestSession = useSessionStore.getState().sessions[serverId];
+                const latestAutoNext = latestSession?.autoNextByAgent.get(agent.id);
+                const latestAgent = latestSession?.agents.get(agent.id);
+                const defaultMessage = latestAutoNext?.message.trim() || AUTO_NEXT_DEFAULT_MESSAGE;
+                const followUp = resolveAutoNextFollowUp({
+                  streamAssistantText,
+                  timelineItems,
+                  autoDecisionEnabled: latestAutoNext?.autoDecisionEnabled ?? false,
+                  defaultMessage,
+                });
+                const cooldownMs = latestAutoNext?.cooldownMs ?? 3_000;
+                const lastSentAt = latestAutoNext?.lastSentAt ?? null;
+                const now = Date.now();
+
+                if (
+                  latestAgent?.status === "idle" &&
+                  latestAutoNext?.enabled &&
+                  followUp &&
+                  sendAgentMessageRef.current &&
+                  (lastSentAt === null || now - lastSentAt >= cooldownMs)
+                ) {
+                  useSessionStore.getState().setAgentAutoNext(serverId, agent.id, {
+                    lastSentAt: now,
+                  });
+                  await sendAgentMessageRef.current(agent.id, followUp, [], []);
+                }
+              } finally {
+                autoNextInFlightRef.current.delete(agent.id);
+              }
+            })();
+          }
         }
       }
 
@@ -497,6 +572,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       setAgents,
       setPendingPermissions,
       setQueuedMessages,
+      client,
     ],
   );
 
