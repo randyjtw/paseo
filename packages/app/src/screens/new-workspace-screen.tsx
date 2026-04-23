@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import Animated from "react-native-reanimated";
 import { createNameId } from "mnemonic-id";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, GitBranch, GitPullRequest } from "lucide-react-native";
@@ -17,13 +16,16 @@ import { ScreenHeader } from "@/components/headers/screen-header";
 import { HEADER_INNER_HEIGHT, MAX_CONTENT_WIDTH, useIsCompactFormFactor } from "@/constants/layout";
 import { useToast } from "@/contexts/toast-context";
 import { useAgentInputDraft } from "@/hooks/use-agent-input-draft";
-import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
-import { normalizeWorkspaceDescriptor, useSessionStore } from "@/stores/session-store";
-import { buildDraftStoreKey, generateDraftId } from "@/stores/draft-keys";
-import { useDraftStore } from "@/stores/draft-store";
-import { useWorkspaceDraftSubmissionStore } from "@/stores/workspace-draft-submission-store";
+import {
+  normalizeWorkspaceDescriptor,
+  useSessionStore,
+  type AgentAutoNextSettings,
+} from "@/stores/session-store";
+import { normalizeAgentSnapshot } from "@/utils/agent-snapshots";
+import { encodeImages } from "@/utils/encode-images";
 import { toErrorMessage } from "@/utils/error-messages";
+import { requireWorkspaceExecutionAuthority } from "@/utils/workspace-execution";
 import { navigateToPreparedWorkspaceTab } from "@/utils/workspace-navigation";
 import type { ComposerAttachment } from "@/attachments/types";
 import type { ImageAttachment, MessagePayload } from "@/components/message-input";
@@ -45,6 +47,14 @@ interface PickerSelection {
   item: PickerItem;
   attachedPrNumber: number | null;
 }
+
+const DEFAULT_DRAFT_AUTO_NEXT_SETTINGS: AgentAutoNextSettings = {
+  enabled: false,
+  message: "下一步",
+  autoDecisionEnabled: false,
+  cooldownMs: 3_000,
+  lastSentAt: null,
+};
 
 const BRANCH_OPTION_PREFIX = "branch:";
 const PR_OPTION_PREFIX = "github-pr:";
@@ -107,15 +117,17 @@ export function NewWorkspaceScreen({
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const isCompact = useIsCompactFormFactor();
-  const { style: keyboardAnimatedStyle } = useKeyboardShiftStyle({
-    mode: "translate",
-  });
   const toast = useToast();
   const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
+  const setAgents = useSessionStore((state) => state.setAgents);
+  const setAgentAutoNext = useSessionStore((state) => state.setAgentAutoNext);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [createdWorkspace, setCreatedWorkspace] = useState<ReturnType<
     typeof normalizeWorkspaceDescriptor
   > | null>(null);
+  const [draftAutoNext, setDraftAutoNext] = useState<AgentAutoNextSettings>(
+    DEFAULT_DRAFT_AUTO_NEXT_SETTINGS,
+  );
   const [pendingAction, setPendingAction] = useState<"chat" | null>(null);
   const [pickerSelection, setPickerSelection] = useState<PickerSelection | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -135,9 +147,8 @@ export function NewWorkspaceScreen({
   const isPending = pendingAction !== null;
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
-  const draftKey = `new-workspace:${serverId}:${sourceDirectory}`;
   const chatDraft = useAgentInputDraft({
-    draftKey,
+    draftKey: `new-workspace:${serverId}:${sourceDirectory}`,
     initialCwd: sourceDirectory,
     composer: {
       initialServerId: serverId || null,
@@ -183,7 +194,7 @@ export function NewWorkspaceScreen({
         limit: 20,
       });
     },
-    enabled: pickerOpen && isConnected && !!client,
+    enabled: isConnected && !!client,
     staleTime: 15_000,
   });
 
@@ -198,7 +209,7 @@ export function NewWorkspaceScreen({
         kinds: ["github-pr"],
       });
     },
-    enabled: pickerOpen && isConnected && !!client,
+    enabled: isConnected && !!client,
     staleTime: 30_000,
   });
 
@@ -324,37 +335,23 @@ export function NewWorkspaceScreen({
       try {
         setPendingAction("chat");
         setErrorMessage(null);
+        const { images, attachments: reviewAttachments } =
+          splitComposerAttachmentsForSubmit(attachments);
+        const workspace = await ensureWorkspace({ cwd, attachments: reviewAttachments });
+        const connectedClient = withConnectedClient();
         if (!composerState) {
           throw new Error("Composer state is required");
         }
-        if (!composerState.selectedProvider) {
-          throw new Error("Select a model");
-        }
 
-        const { attachments: reviewAttachments } = splitComposerAttachmentsForSubmit(attachments);
-        const workspace = await ensureWorkspace({ cwd, attachments: reviewAttachments });
-        const draftId = generateDraftId();
-        const workspaceDirectory = workspace.workspaceDirectory;
-        useDraftStore.getState().saveDraftInput({
-          draftKey: buildDraftStoreKey({
-            serverId,
-            agentId: draftId,
-            draftId,
-          }),
-          draft: {
-            text,
-            attachments,
-            cwd: workspaceDirectory,
-          },
-        });
-        useWorkspaceDraftSubmissionStore.getState().setPending({
-          serverId,
-          workspaceId: workspace.id,
-          draftId,
-          text,
-          attachments,
-          cwd: workspaceDirectory,
+        const initialPrompt = text.trim();
+        const encodedImages = await encodeImages(images);
+        const workspaceDirectory = requireWorkspaceExecutionAuthority({
+          workspace,
+        }).workspaceDirectory;
+        const agent = await connectedClient.createAgent({
           provider: composerState.selectedProvider,
+          cwd: workspaceDirectory,
+          workspaceId: workspace.id,
           ...(composerState.modeOptions.length > 0 && composerState.selectedMode !== ""
             ? { modeId: composerState.selectedMode }
             : {}),
@@ -362,24 +359,41 @@ export function NewWorkspaceScreen({
           ...(composerState.effectiveThinkingOptionId
             ? { thinkingOptionId: composerState.effectiveThinkingOptionId }
             : {}),
-          ...(composerState.featureValues ? { featureValues: composerState.featureValues } : {}),
-          allowEmptyText: true,
+          ...(initialPrompt ? { initialPrompt } : {}),
+          ...(encodedImages && encodedImages.length > 0 ? { images: encodedImages } : {}),
+          ...(reviewAttachments.length > 0 ? { attachments: reviewAttachments } : {}),
         });
+
+        setAgents(serverId, (previous) => {
+          const next = new Map(previous);
+          next.set(agent.id, normalizeAgentSnapshot(agent, serverId));
+          return next;
+        });
+        setAgentAutoNext(serverId, agent.id, draftAutoNext);
         navigateToPreparedWorkspaceTab({
           serverId,
           workspaceId: workspace.id,
-          target: { kind: "draft", draftId },
+          target: { kind: "agent", agentId: agent.id },
           navigationMethod: "replace",
         });
-        useDraftStore.getState().clearDraftInput({ draftKey, lifecycle: "sent" });
       } catch (error) {
         const message = toErrorMessage(error);
-        setPendingAction(null);
         setErrorMessage(message);
         toast.error(message);
+      } finally {
+        setPendingAction(null);
       }
     },
-    [composerState, draftKey, ensureWorkspace, serverId, toast],
+    [
+      composerState,
+      draftAutoNext,
+      ensureWorkspace,
+      serverId,
+      setAgentAutoNext,
+      setAgents,
+      toast,
+      withConnectedClient,
+    ],
   );
 
   const workspaceTitle =
@@ -497,16 +511,17 @@ export function NewWorkspaceScreen({
               composerState
                 ? {
                     ...composerState.statusControls,
+                    autoNextSettings: draftAutoNext,
+                    onChangeAutoNext: (updates) => {
+                      setDraftAutoNext((current) => ({ ...current, ...updates }));
+                    },
                     disabled: isPending,
                   }
                 : undefined
             }
             onAddImages={handleAddImagesCallback}
           />
-          <Animated.View
-            testID="new-workspace-ref-picker-row"
-            style={[styles.optionsRow, keyboardAnimatedStyle]}
-          >
+          <View style={styles.optionsRow}>
             <View>
               <Tooltip>
                 <TooltipTrigger asChild triggerRefProp="ref">
@@ -569,7 +584,7 @@ export function NewWorkspaceScreen({
                 renderOption={renderPickerOption}
               />
             </View>
-          </Animated.View>
+          </View>
           {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
         </View>
       </View>

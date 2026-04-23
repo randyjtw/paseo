@@ -48,7 +48,7 @@ const INITIAL_USER_MODIFIED: UserModifiedFields = {
 // Internal form state
 interface FormState {
   serverId: string | null;
-  provider: AgentProvider | null;
+  provider: AgentProvider;
   modeId: string;
   model: string;
   thinkingOptionId: string;
@@ -68,7 +68,7 @@ export type UseAgentFormStateResult = {
   selectedServerId: string | null;
   setSelectedServerId: (value: string | null) => void;
   setSelectedServerIdFromUser: (value: string | null) => void;
-  selectedProvider: AgentProvider | null;
+  selectedProvider: AgentProvider;
   setProviderFromUser: (provider: AgentProvider) => void;
   selectedMode: string;
   setModeFromUser: (modeId: string) => void;
@@ -96,6 +96,9 @@ export type UseAgentFormStateResult = {
   workingDirIsEmpty: boolean;
   persistFormPreferences: () => Promise<void>;
 };
+
+const DEFAULT_PROVIDER: AgentProvider = "claude";
+const DEFAULT_MODE_FOR_DEFAULT_PROVIDER = "default";
 
 function normalizeSelectedModelId(modelId: string | null | undefined): string {
   const normalized = typeof modelId === "string" ? modelId.trim() : "";
@@ -157,18 +160,6 @@ function resolveThinkingOptionId(args: {
   return effectiveModel?.defaultThinkingOptionId ?? thinkingOptions[0]?.id ?? "";
 }
 
-function mergeSelectedComposerPreferences(args: {
-  preferences: FormPreferences;
-  provider: AgentProvider;
-  updates: Partial<ProviderPreferences>;
-}): FormPreferences {
-  return mergeProviderPreferences({
-    preferences: args.preferences,
-    provider: args.provider,
-    updates: args.updates,
-  });
-}
-
 /**
  * Pure function that resolves form state from multiple data sources.
  * Priority: explicit (URL params) > provider defaults > lightweight app prefs > fallback
@@ -186,6 +177,8 @@ function resolveFormState(
 ): FormState {
   // Start with current state - we only update non-user-modified fields
   const result = { ...currentState };
+  const fallbackProvider = allowedProviderMap.keys().next().value as AgentProvider | undefined;
+
   // 1. Resolve provider first (other fields depend on it)
   if (!userModified.provider) {
     if (initialValues?.provider && allowedProviderMap.has(initialValues.provider)) {
@@ -195,33 +188,22 @@ function resolveFormState(
       allowedProviderMap.has(preferences.provider as AgentProvider)
     ) {
       result.provider = preferences.provider as AgentProvider;
-    } else if (
-      result.provider &&
-      allowedProviderMap.size > 0 &&
-      !allowedProviderMap.has(result.provider)
-    ) {
-      result.provider = null;
+    } else if (!allowedProviderMap.has(result.provider) && fallbackProvider) {
+      result.provider = fallbackProvider;
     }
-  } else if (
-    result.provider &&
-    allowedProviderMap.size > 0 &&
-    !allowedProviderMap.has(result.provider)
-  ) {
-    result.provider = null;
+    // else keep current (initialized to DEFAULT_PROVIDER)
+  } else if (!allowedProviderMap.has(result.provider) && fallbackProvider) {
+    result.provider = fallbackProvider;
   }
 
-  const providerDef = result.provider ? allowedProviderMap.get(result.provider) : undefined;
-  const providerPrefs = result.provider
-    ? preferences?.providerPreferences?.[result.provider]
-    : undefined;
+  const providerDef = allowedProviderMap.get(result.provider);
+  const providerPrefs = preferences?.providerPreferences?.[result.provider];
 
   // 2. Resolve modeId (depends on provider)
   if (!userModified.modeId) {
     const validModeIds = providerDef?.modes.map((m) => m.id) ?? [];
 
-    if (!result.provider) {
-      result.modeId = "";
-    } else if (
+    if (
       typeof initialValues?.modeId === "string" &&
       initialValues.modeId.length > 0 &&
       validModeIds.includes(initialValues.modeId)
@@ -241,9 +223,7 @@ function resolveFormState(
     const preferredModel = normalizeSelectedModelId(providerPrefs?.model);
     const defaultModelId = resolveDefaultModelId(availableModels);
 
-    if (!result.provider) {
-      result.model = "";
-    } else if (initialModel) {
+    if (initialModel) {
       if (!availableModels || isValidModel(initialModel)) {
         result.model = initialModel;
       } else {
@@ -266,9 +246,7 @@ function resolveFormState(
       ? initialValues.thinkingOptionId.trim()
       : "";
 
-  if (!result.provider) {
-    result.thinkingOptionId = "";
-  } else if (!userModified.thinkingOptionId) {
+  if (!userModified.thinkingOptionId) {
     const effectiveModelId = result.model.trim();
     const preferredThinking = effectiveModelId
       ? (providerPrefs?.thinkingByModel?.[effectiveModelId]?.trim() ?? "")
@@ -284,7 +262,7 @@ function resolveFormState(
   }
 
   // Validate thinking option once model metadata is available.
-  if (result.provider && availableModels) {
+  if (availableModels) {
     result.thinkingOptionId = resolveThinkingOptionId({
       availableModels,
       modelId: result.model,
@@ -334,37 +312,6 @@ function combineInitialValues(
   return initialValues;
 }
 
-const RESOLVABLE_PROVIDER_STATUSES = new Set<ProviderSnapshotEntry["status"]>(["ready", "loading"]);
-const SELECTABLE_PROVIDER_STATUSES = new Set<ProviderSnapshotEntry["status"]>(["ready"]);
-
-function buildProviderDefinitionMap(
-  providerDefinitions: AgentProviderDefinition[],
-): Map<AgentProvider, AgentProviderDefinition> {
-  return new Map<AgentProvider, AgentProviderDefinition>(
-    providerDefinitions.map((definition) => [definition.id, definition]),
-  );
-}
-
-function buildProviderDefinitionMapForStatuses(args: {
-  snapshotEntries: ProviderSnapshotEntry[] | undefined;
-  providerDefinitions: AgentProviderDefinition[];
-  statuses: ReadonlySet<ProviderSnapshotEntry["status"]>;
-}): Map<AgentProvider, AgentProviderDefinition> {
-  if (!args.snapshotEntries?.length) {
-    return buildProviderDefinitionMap(args.providerDefinitions);
-  }
-
-  const matchingProviders = new Set(
-    args.snapshotEntries
-      .filter((entry) => args.statuses.has(entry.status))
-      .map((entry) => entry.provider),
-  );
-
-  return buildProviderDefinitionMap(
-    args.providerDefinitions.filter((definition) => matchingProviders.has(definition.id)),
-  );
-}
-
 export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAgentFormStateResult {
   const {
     initialServerId = null,
@@ -388,8 +335,8 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
   // Form state
   const [formState, setFormState] = useState<FormState>(() => ({
     serverId: initialServerId,
-    provider: null,
-    modeId: "",
+    provider: DEFAULT_PROVIDER,
+    modeId: DEFAULT_MODE_FOR_DEFAULT_PROVIDER,
     model: "",
     thinkingOptionId: "",
     workingDir: "",
@@ -401,14 +348,12 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
 
   // Track if we've done initial resolution (to avoid flickering)
   const hasResolvedRef = useRef(false);
-  const hydrationPreferencesRef = useRef<FormPreferences | null>(null);
 
   // Reset user modifications when form becomes invisible
   useEffect(() => {
     if (!isVisible) {
       setUserModified(INITIAL_USER_MODIFIED);
       hasResolvedRef.current = false;
-      hydrationPreferencesRef.current = null;
     }
   }, [isVisible]);
 
@@ -418,7 +363,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
     error: snapshotError,
     refresh: refreshSnapshot,
     refetchIfStale: refetchSnapshotIfStale,
-  } = useProvidersSnapshot(formState.serverId);
+  } = useProvidersSnapshot(formState.serverId, formState.workingDir);
 
   const allProviderEntries = useMemo(() => snapshotEntries ?? [], [snapshotEntries]);
   const snapshotProviderDefinitions = useMemo(
@@ -426,25 +371,25 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
     [snapshotEntries],
   );
   const snapshotProviderDefinitionMap = useMemo(
-    () => buildProviderDefinitionMap(snapshotProviderDefinitions),
+    () =>
+      new Map<AgentProvider, AgentProviderDefinition>(
+        snapshotProviderDefinitions.map((definition) => [definition.id, definition]),
+      ),
     [snapshotProviderDefinitions],
   );
-  const snapshotResolvableProviderDefinitionMap = useMemo(
-    () =>
-      buildProviderDefinitionMapForStatuses({
-        snapshotEntries,
-        providerDefinitions: snapshotProviderDefinitions,
-        statuses: RESOLVABLE_PROVIDER_STATUSES,
-      }),
-    [snapshotEntries, snapshotProviderDefinitions],
-  );
   const snapshotSelectableProviderDefinitionMap = useMemo(() => {
-    return buildProviderDefinitionMapForStatuses({
-      snapshotEntries,
-      providerDefinitions: snapshotProviderDefinitions,
-      statuses: SELECTABLE_PROVIDER_STATUSES,
-    });
-  }, [snapshotEntries, snapshotProviderDefinitions]);
+    if (!snapshotEntries?.length) {
+      return snapshotProviderDefinitionMap;
+    }
+    const readyProviders = new Set(
+      snapshotEntries.filter((entry) => entry.status === "ready").map((entry) => entry.provider),
+    );
+    return new Map<AgentProvider, AgentProviderDefinition>(
+      snapshotProviderDefinitions
+        .filter((definition) => readyProviders.has(definition.id))
+        .map((definition) => [definition.id, definition]),
+    );
+  }, [snapshotEntries, snapshotProviderDefinitionMap, snapshotProviderDefinitions]);
   const snapshotAllProviderModels = useMemo(() => {
     const map = new Map<string, AgentModelDefinition[]>();
     for (const entry of snapshotEntries ?? []) {
@@ -453,17 +398,13 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
     return map;
   }, [snapshotEntries]);
   const snapshotSelectedEntry = useMemo(
-    () =>
-      formState.provider
-        ? ((snapshotEntries ?? []).find((entry) => entry.provider === formState.provider) ?? null)
-        : null,
+    () => (snapshotEntries ?? []).find((entry) => entry.provider === formState.provider) ?? null,
     [formState.provider, snapshotEntries],
   );
   const snapshotSelectedProviderModels = snapshotSelectedEntry?.models ?? null;
-  const selectedProviderIsLoading = snapshotSelectedEntry?.status === "loading";
   const snapshotSelectedProviderModes =
     snapshotSelectedEntry?.modes ??
-    (formState.provider ? snapshotProviderDefinitionMap.get(formState.provider)?.modes : []) ??
+    snapshotProviderDefinitionMap.get(formState.provider)?.modes ??
     [];
   const providerDefinitions = snapshotProviderDefinitions;
   const providerDefinitionMap = snapshotProviderDefinitionMap;
@@ -471,7 +412,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
   const allProviderModels = snapshotAllProviderModels;
   const availableModels = snapshotSelectedProviderModels;
   const modeOptions = snapshotSelectedProviderModes;
-  const isAllModelsLoading = snapshotIsLoading || selectedProviderIsLoading;
+  const isAllModelsLoading = snapshotIsLoading;
 
   // Combine initialValues with initialServerId for resolution
   const combinedInitialValues = useMemo((): FormInitialValues | undefined => {
@@ -484,23 +425,19 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
       return;
     }
 
-    if (isPreferencesLoading && !hasResolvedRef.current) {
+    // Wait for preferences to load before first resolution, unless explicit URL overrides exist.
+    if (isPreferencesLoading && !hasResolvedRef.current && !combinedInitialValues) {
       return;
     }
 
-    if (!hasResolvedRef.current) {
-      hydrationPreferencesRef.current = preferences;
-    }
-    const hydrationPreferences = hydrationPreferencesRef.current ?? preferences;
-
     const resolved = resolveFormState(
       combinedInitialValues,
-      hydrationPreferences,
+      preferences,
       availableModels,
       userModified,
       formStateRef.current,
       validServerIds,
-      snapshotResolvableProviderDefinitionMap,
+      selectableProviderDefinitionMap,
     );
 
     // Only update if something changed
@@ -525,7 +462,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
     availableModels,
     userModified,
     validServerIds,
-    snapshotResolvableProviderDefinitionMap,
+    selectableProviderDefinitionMap,
   ]);
 
   // Auto-select the first online host when:
@@ -634,38 +571,15 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
         thinkingOptionId: nextThinkingOptionId,
       }));
       setUserModified((prev) => ({ ...prev, provider: true, model: true }));
-      void updatePreferences((current) =>
-        mergeSelectedComposerPreferences({
-          preferences: current,
-          provider,
-          updates: {
-            model: nextModelId || undefined,
-          },
-        }),
-      );
+      void updatePreferences({ provider });
     },
     [allProviderModels, selectableProviderDefinitionMap, updatePreferences],
   );
 
-  const setModeFromUser = useCallback(
-    (modeId: string) => {
-      setFormState((prev) => ({ ...prev, modeId }));
-      setUserModified((prev) => ({ ...prev, modeId: true }));
-      const provider = formStateRef.current.provider;
-      if (provider) {
-        void updatePreferences((current) =>
-          mergeSelectedComposerPreferences({
-            preferences: current,
-            provider,
-            updates: {
-              mode: modeId || undefined,
-            },
-          }),
-        );
-      }
-    },
-    [updatePreferences],
-  );
+  const setModeFromUser = useCallback((modeId: string) => {
+    setFormState((prev) => ({ ...prev, modeId }));
+    setUserModified((prev) => ({ ...prev, modeId: true }));
+  }, []);
 
   const setModelFromUser = useCallback(
     (modelId: string) => {
@@ -684,44 +598,14 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
         thinkingOptionId: nextThinkingOptionId,
       }));
       setUserModified((prev) => ({ ...prev, model: true }));
-      const provider = formStateRef.current.provider;
-      if (provider) {
-        void updatePreferences((current) =>
-          mergeSelectedComposerPreferences({
-            preferences: current,
-            provider,
-            updates: {
-              model: nextModelId || undefined,
-            },
-          }),
-        );
-      }
     },
-    [availableModels, updatePreferences, userModified.thinkingOptionId],
+    [availableModels, userModified.thinkingOptionId],
   );
 
-  const setThinkingOptionFromUser = useCallback(
-    (thinkingOptionId: string) => {
-      setFormState((prev) => ({ ...prev, thinkingOptionId }));
-      setUserModified((prev) => ({ ...prev, thinkingOptionId: true }));
-      const provider = formStateRef.current.provider;
-      const modelId = formStateRef.current.model;
-      if (provider && modelId) {
-        void updatePreferences((current) =>
-          mergeSelectedComposerPreferences({
-            preferences: current,
-            provider,
-            updates: {
-              thinkingByModel: {
-                [modelId]: thinkingOptionId,
-              },
-            },
-          }),
-        );
-      }
-    },
-    [updatePreferences],
-  );
+  const setThinkingOptionFromUser = useCallback((thinkingOptionId: string) => {
+    setFormState((prev) => ({ ...prev, thinkingOptionId }));
+    setUserModified((prev) => ({ ...prev, thinkingOptionId: true }));
+  }, []);
 
   const setWorkingDir = useCallback((value: string) => {
     setFormState((prev) => ({ ...prev, workingDir: value }));
@@ -737,25 +621,32 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
   }, []);
 
   const refreshProviderModels = useCallback(() => {
-    refreshSnapshot();
+    void refreshSnapshot([formStateRef.current.provider]);
   }, [refreshSnapshot]);
 
   const refetchProviderModelsIfStale = useCallback(() => {
-    refetchSnapshotIfStale(formStateRef.current.provider);
-  }, [refetchSnapshotIfStale]);
+    const selectedProvider = formStateRef.current.provider;
+    const selectedEntry = snapshotEntries?.find((entry) => entry.provider === selectedProvider);
+    const shouldWarmSelectedProvider =
+      !selectedEntry ||
+      selectedEntry.status !== "ready" ||
+      (selectedEntry.models?.length ?? 0) === 0;
 
-  const persistFormPreferences = useCallback(async () => {
-    if (!formState.provider) {
+    if (shouldWarmSelectedProvider) {
+      void refreshSnapshot([selectedProvider]);
       return;
     }
 
-    const provider = formState.provider;
+    refetchSnapshotIfStale();
+  }, [refetchSnapshotIfStale, refreshSnapshot, snapshotEntries]);
+
+  const persistFormPreferences = useCallback(async () => {
     const resolvedModel = resolveEffectiveModel(availableModels, formState.model);
     const modelId = resolvedModel?.id ?? formState.model;
     await updatePreferences((current) =>
       mergeProviderPreferences({
         preferences: current,
-        provider,
+        provider: formState.provider,
         updates: {
           model: modelId || undefined,
           mode: formState.modeId || undefined,
@@ -778,13 +669,11 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
     updatePreferences,
   ]);
 
-  const agentDefinition = formState.provider
-    ? providerDefinitionMap.get(formState.provider)
-    : undefined;
+  const agentDefinition = providerDefinitionMap.get(formState.provider);
   const effectiveModel = resolveEffectiveModel(availableModels, formState.model);
   const resolvedModelId = effectiveModel?.id ?? formState.model;
   const availableThinkingOptions = effectiveModel?.thinkingOptions ?? [];
-  const isModelLoading = snapshotIsLoading || selectedProviderIsLoading;
+  const isModelLoading = snapshotIsLoading;
   const modelError = snapshotError;
 
   const workingDirIsEmpty = !formState.workingDir.trim();
@@ -861,10 +750,7 @@ export function useAgentFormState(options: UseAgentFormStateOptions = {}): UseAg
 export type CreateAgentInitialValues = FormInitialValues;
 
 export const __private__ = {
-  buildProviderDefinitionMap,
-  buildProviderDefinitionMapForStatuses,
   combineInitialValues,
-  mergeSelectedComposerPreferences,
   resolveDefaultModel,
   resolveFormState,
   resolveThinkingOptionId,

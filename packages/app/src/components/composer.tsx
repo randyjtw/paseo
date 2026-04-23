@@ -19,6 +19,8 @@ import { FOOTER_HEIGHT, MAX_CONTENT_WIDTH } from "@/constants/layout";
 import { generateMessageId, type StreamItem } from "@/types/stream";
 import {
   AgentStatusBar,
+  AgentAutoNextControl,
+  AgentAutoNextStatusButton,
   DraftAgentStatusBar,
   type DraftAgentStatusBarProps,
 } from "./agent-status-bar";
@@ -763,8 +765,24 @@ export function Composer({
   const contextWindowMaxTokens = hasContextWindowMeter ? agentState.contextWindowMaxTokens : null;
   const contextWindowUsedTokens = hasContextWindowMeter ? agentState.contextWindowUsedTokens : null;
 
-  const beforeVoiceContent = useMemo(
-    () => (
+  const beforeVoiceContent = useMemo(() => {
+    const draftAutoNextButton =
+      resolveStatusControlMode(statusControls) === "draft" &&
+      statusControls?.autoNextSettings &&
+      statusControls?.onChangeAutoNext ? (
+        <AgentAutoNextControl
+          settings={statusControls.autoNextSettings}
+          disabled={statusControls.disabled}
+          onChange={statusControls.onChangeAutoNext}
+        />
+      ) : null;
+
+    const readyAutoNextButton =
+      draftAutoNextButton === null && hasAgent ? (
+        <AgentAutoNextStatusButton agentId={agentId} serverId={serverId} />
+      ) : null;
+
+    return (
       <View style={styles.contextWindowMeterSlot}>
         {contextWindowMaxTokens !== null && contextWindowUsedTokens !== null ? (
           <ContextWindowMeter
@@ -772,10 +790,18 @@ export function Composer({
             usedTokens={contextWindowUsedTokens}
           />
         ) : null}
+        {draftAutoNextButton}
+        {readyAutoNextButton}
       </View>
-    ),
-    [contextWindowMaxTokens, contextWindowUsedTokens],
-  );
+    );
+  }, [
+    agentId,
+    contextWindowMaxTokens,
+    contextWindowUsedTokens,
+    hasAgent,
+    serverId,
+    statusControls,
+  ]);
 
   const githubSearchQueryTrimmed = githubSearchQuery.trim();
   const githubSearchResultsQuery = useQuery({
@@ -1139,10 +1165,11 @@ const styles = StyleSheet.create(((theme: Theme) => ({
     gap: theme.spacing[1],
   },
   contextWindowMeterSlot: {
-    width: 28,
-    height: 28,
+    minHeight: 28,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: theme.spacing[1],
   },
   realtimeVoiceButton: {
     width: 28,

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { View, Text, Pressable, Keyboard, TextInput } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useShallow } from "zustand/shallow";
@@ -29,7 +29,10 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuHint,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Combobox, ComboboxItem, type ComboboxOption } from "@/components/ui/combobox";
@@ -91,11 +94,12 @@ type ControlledAgentStatusBarProps = {
   onSetFeature?: (featureId: string, value: unknown) => void;
   onDropdownClose?: () => void;
   onModelSelectorOpen?: () => void;
+  trailingContent?: ReactNode;
 };
 
 export interface DraftAgentStatusBarProps {
   providerDefinitions: AgentProviderDefinition[];
-  selectedProvider: AgentProvider | null;
+  selectedProvider: AgentProvider;
   onSelectProvider: (provider: AgentProvider) => void;
   modeOptions: AgentMode[];
   selectedMode: string;
@@ -114,6 +118,8 @@ export interface DraftAgentStatusBarProps {
   onSetFeature?: (featureId: string, value: unknown) => void;
   onDropdownClose?: () => void;
   onModelSelectorOpen?: () => void;
+  autoNextSettings?: AgentAutoNextSettings;
+  onChangeAutoNext?: (updates: Partial<AgentAutoNextSettings>) => void;
   disabled?: boolean;
 }
 
@@ -141,6 +147,10 @@ const AUTO_NEXT_COOLDOWN_OPTIONS = [1_000, 3_000, 5_000, 10_000];
 
 function formatCooldownLabel(cooldownMs: number): string {
   return `${Math.max(1, Math.round(cooldownMs / 1000))}s`;
+}
+
+function isPlanModeFeature(feature: AgentFeature): boolean {
+  return feature.type === "toggle" && feature.id === "plan_mode";
 }
 
 function findOptionLabel(
@@ -242,6 +252,7 @@ function ControlledStatusBar({
   onSetFeature,
   onDropdownClose,
   onModelSelectorOpen,
+  trailingContent,
 }: ControlledAgentStatusBarProps) {
   const { theme } = useUnistyles();
   const [prefsOpen, setPrefsOpen] = useState(false);
@@ -278,8 +289,7 @@ function ControlledStatusBar({
     : undefined;
   const ModeIconComponent = modeVisuals?.icon ? MODE_ICONS[modeVisuals.icon] : null;
   const modeIconColor = getModeIconColor(modeVisuals?.colorTier, theme.colors.palette);
-  const hasSelectedProvider = provider.trim().length > 0;
-  const ProviderIcon = hasSelectedProvider ? getProviderIcon(provider) : null;
+  const ProviderIcon = getProviderIcon(provider);
 
   const hasAnyControl =
     Boolean(providerOptions?.length) ||
@@ -414,38 +424,56 @@ function ControlledStatusBar({
           ) : null}
 
           {canSelectModel ? (
-            <Tooltip
-              key={`model-${displayModel}`}
-              delayDuration={0}
-              enabledOnDesktop
-              enabledOnMobile={false}
-            >
-              <TooltipTrigger asChild triggerRefProp="ref">
-                <View>
-                  <CombinedModelSelector
-                    providerDefinitions={effectiveProviderDefinitions}
-                    allProviderModels={effectiveAllProviderModels}
-                    selectedProvider={provider}
-                    selectedModel={selectedModelId ?? ""}
-                    canSelectProvider={canSelectProviderInModelMenu}
-                    onSelect={(selectedProviderId, modelId) => {
-                      if (selectedProviderId === provider) {
-                        onSelectModel?.(modelId);
-                      }
-                    }}
-                    favoriteKeys={favoriteKeys}
-                    onToggleFavorite={onToggleFavoriteModel}
-                    isLoading={isModelLoading}
+            <>
+              <Tooltip
+                key={`model-${displayModel}`}
+                delayDuration={0}
+                enabledOnDesktop
+                enabledOnMobile={false}
+              >
+                <TooltipTrigger asChild triggerRefProp="ref">
+                  <Pressable
+                    ref={modelAnchorRef}
+                    collapsable={false}
                     disabled={modelDisabled}
-                    onOpen={onModelSelectorOpen}
-                    onClose={onDropdownClose}
-                  />
-                </View>
-              </TooltipTrigger>
-              <TooltipContent side="top" align="center" offset={8}>
-                <Text style={styles.tooltipText}>{getStatusSelectorHint("model")}</Text>
-              </TooltipContent>
-            </Tooltip>
+                    onPress={() => {
+                      onModelSelectorOpen?.();
+                      handleSelectorPress("model");
+                    }}
+                    style={({ pressed, hovered }) => [
+                      styles.modeBadge,
+                      styles.modelBadge,
+                      hovered && styles.modeBadgeHovered,
+                      (pressed || openSelector === "model") && styles.modeBadgePressed,
+                      modelDisabled && styles.disabledBadge,
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Select model (${displayModel})`}
+                    testID="agent-model-selector"
+                  >
+                    <ProviderIcon size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
+                    <Text style={styles.modeBadgeText} numberOfLines={1}>
+                      {displayModel}
+                    </Text>
+                    <ChevronDown size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
+                  </Pressable>
+                </TooltipTrigger>
+                <TooltipContent side="top" align="center" offset={8}>
+                  <Text style={styles.tooltipText}>{getStatusSelectorHint("model")}</Text>
+                </TooltipContent>
+              </Tooltip>
+              <Combobox
+                options={comboboxModelOptions}
+                value={selectedModelId ?? ""}
+                onSelect={(id) => onSelectModel?.(id)}
+                searchable={comboboxModelOptions.length > SEARCH_THRESHOLD}
+                open={openSelector === "model"}
+                onOpenChange={handleOpenChange("model")}
+                anchorRef={modelAnchorRef}
+                desktopPlacement="top-start"
+                title="Select model"
+              />
+            </>
           ) : null}
 
           {thinkingOptions && thinkingOptions.length > 0 ? (
@@ -533,8 +561,66 @@ function ControlledStatusBar({
             </>
           ) : null}
 
+          {features?.filter(isPlanModeFeature).map((feature) => (
+            <View
+              key={`feature-inline-${feature.id}`}
+              style={styles.planModeInlineToggleContainer}
+            >
+              <Text style={styles.modeBadgeText}>Plan Mode</Text>
+              <View style={[styles.planModeInlineActions, disabled && styles.disabledBadge]}>
+                <Pressable
+                  disabled={disabled}
+                  onPress={() => onSetFeature?.(feature.id, false)}
+                  style={({ pressed, hovered }) => [
+                    styles.planModeInlineOption,
+                    !feature.value && styles.planModeInlineOptionActive,
+                    hovered && styles.planModeInlineOptionHovered,
+                    pressed && styles.planModeInlineOptionPressed,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Turn plan mode off"
+                  testID="agent-plan-mode-off"
+                >
+                  <Text
+                    style={[
+                      styles.planModeInlineText,
+                      !feature.value && styles.planModeInlineTextActive,
+                    ]}
+                  >
+                    OFF
+                  </Text>
+                </Pressable>
+                <Pressable
+                  disabled={disabled}
+                  onPress={() => onSetFeature?.(feature.id, true)}
+                  style={({ pressed, hovered }) => [
+                    styles.planModeInlineOption,
+                    feature.value && styles.planModeInlineOptionActive,
+                    hovered && styles.planModeInlineOptionHovered,
+                    pressed && styles.planModeInlineOptionPressed,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Turn plan mode on"
+                  testID="agent-plan-mode-on"
+                >
+                  <Text
+                    style={[
+                      styles.planModeInlineText,
+                      feature.value && styles.planModeInlineTextActive,
+                    ]}
+                  >
+                    ON
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ))}
+
           {features?.map((feature) => {
             if (feature.type === "toggle") {
+              if (isPlanModeFeature(feature)) {
+                return null;
+              }
               const FeatureIcon = getFeatureIcon(feature.icon);
               return (
                 <Tooltip
@@ -631,6 +717,8 @@ function ControlledStatusBar({
             }
             return null;
           })}
+
+          {trailingContent}
         </>
       ) : (
         <>
@@ -644,9 +732,7 @@ function ControlledStatusBar({
             accessibilityLabel="Agent preferences"
             testID="agent-preferences-button"
           >
-            {ProviderIcon ? (
-              <ProviderIcon size={theme.iconSize.lg} color={theme.colors.foregroundMuted} />
-            ) : null}
+            <ProviderIcon size={theme.iconSize.lg} color={theme.colors.foregroundMuted} />
             <Text style={styles.prefsButtonText} numberOfLines={1}>
               {displayModel}
             </Text>
@@ -688,12 +774,7 @@ function ControlledStatusBar({
                       pointerEvents="none"
                       testID="agent-preferences-model"
                     >
-                      {ProviderIcon ? (
-                        <ProviderIcon
-                          size={theme.iconSize.md}
-                          color={theme.colors.foregroundMuted}
-                        />
-                      ) : null}
+                      <ProviderIcon size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
                       <Text style={styles.sheetSelectText}>{selectedModelLabel}</Text>
                       <ChevronDown size={theme.iconSize.md} color={theme.colors.foregroundMuted} />
                     </View>
@@ -864,7 +945,11 @@ function ControlledStatusBar({
   );
 }
 
-function AgentAutoNextControl({ settings, disabled = false, onChange }: AgentAutoNextControlProps) {
+export function AgentAutoNextControl({
+  settings,
+  disabled = false,
+  onChange,
+}: AgentAutoNextControlProps) {
   const { theme } = useUnistyles();
   const [isOpen, setIsOpen] = useState(false);
   const [draftMessage, setDraftMessage] = useState(settings.message);
@@ -883,15 +968,121 @@ function AgentAutoNextControl({ settings, disabled = false, onChange }: AgentAut
     }
   }, [draftMessage, onChange, settings.message]);
 
+  const triggerContent = (
+    <>
+      {settings.enabled ? (
+        <Pause size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
+      ) : (
+        <Play size={theme.iconSize.sm} color={theme.colors.palette.green[500]} />
+      )}
+      <Text style={styles.autoNextToolbarText}>
+        {settings.enabled ? "STOP" : "START"}
+      </Text>
+    </>
+  );
+
+  if (platformIsWeb) {
+    return (
+      <View style={styles.autoNextSplitButton}>
+        <Pressable
+          disabled={disabled}
+          onPress={() => onChange({ enabled: !settings.enabled })}
+          style={({ pressed, hovered }) => [
+            styles.autoNextToolbarButton,
+            styles.autoNextToolbarMainButton,
+            hovered && styles.autoNextToolbarButtonHovered,
+            pressed && styles.autoNextToolbarButtonPressed,
+            disabled && styles.disabledBadge,
+            settings.enabled && styles.autoNextButtonEnabled,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={settings.enabled ? "Stop auto-next" : "Start auto-next"}
+          testID="agent-auto-next-button"
+        >
+          {triggerContent}
+        </Pressable>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            disabled={disabled}
+            style={({ pressed }) => [
+              styles.autoNextToolbarButton,
+              styles.autoNextToolbarChevronButton,
+              pressed && styles.autoNextToolbarButtonPressed,
+              disabled && styles.disabledBadge,
+              settings.enabled && styles.autoNextButtonEnabled,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Open auto-next menu"
+            testID="agent-auto-next-menu-button"
+          >
+            <ChevronDown size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start">
+            <DropdownMenuLabel>Auto next</DropdownMenuLabel>
+            <DropdownMenuItem
+              selected={!settings.enabled}
+              onSelect={() => onChange({ enabled: false })}
+              testID="agent-auto-next-off"
+            >
+              Off
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              selected={settings.enabled}
+              onSelect={() => onChange({ enabled: true })}
+              testID="agent-auto-next-on"
+            >
+              On
+            </DropdownMenuItem>
+            <View style={styles.autoNextMenuField}>
+              <Text style={styles.autoNextMenuFieldLabel}>Message</Text>
+              <TextInput
+                value={draftMessage}
+                editable={!disabled}
+                onChangeText={(nextValue) => {
+                  setDraftMessage(nextValue);
+                  const normalized = nextValue.trim() || AUTO_NEXT_DEFAULT_MESSAGE;
+                  onChange({ message: normalized });
+                }}
+                onBlur={commitMessage}
+                placeholder={AUTO_NEXT_DEFAULT_MESSAGE}
+                placeholderTextColor={theme.colors.foregroundMuted}
+                style={[styles.autoNextMenuInput, disabled && styles.disabledSheetSelect]}
+                testID="agent-auto-next-message"
+              />
+            </View>
+            <DropdownMenuHint>Saved automatically and reused next time.</DropdownMenuHint>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel>Auto decision</DropdownMenuLabel>
+            <DropdownMenuItem
+              selected={!settings.autoDecisionEnabled}
+              onSelect={() => onChange({ autoDecisionEnabled: false })}
+              testID="agent-auto-next-auto-decision-off"
+            >
+              Off
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              selected={settings.autoDecisionEnabled}
+              onSelect={() => onChange({ autoDecisionEnabled: true })}
+              testID="agent-auto-next-auto-decision-on"
+            >
+              On
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </View>
+    );
+  }
+
   return (
     <>
       <Pressable
         disabled={disabled}
         onPress={() => setIsOpen(true)}
         style={({ pressed, hovered }) => [
-          styles.modeBadge,
-          hovered && styles.modeBadgeHovered,
-          pressed && styles.modeBadgePressed,
+          styles.autoNextToolbarButton,
+          hovered && styles.autoNextToolbarButtonHovered,
+          pressed && styles.autoNextToolbarButtonPressed,
           disabled && styles.disabledBadge,
           settings.enabled && styles.autoNextButtonEnabled,
         ]}
@@ -899,14 +1090,7 @@ function AgentAutoNextControl({ settings, disabled = false, onChange }: AgentAut
         accessibilityLabel="Auto-next settings"
         testID="agent-auto-next-button"
       >
-        {settings.enabled ? (
-          <Play size={theme.iconSize.sm} color={theme.colors.palette.green[500]} />
-        ) : (
-          <Pause size={theme.iconSize.sm} color={theme.colors.foregroundMuted} />
-        )}
-        <Text style={styles.modeBadgeText}>
-          {settings.enabled ? "Auto-next on" : "Auto-next off"}
-        </Text>
+        {triggerContent}
       </Pressable>
 
       <AdaptiveModalSheet
@@ -1006,6 +1190,27 @@ function AgentAutoNextControl({ settings, disabled = false, onChange }: AgentAut
   );
 }
 
+export const AgentAutoNextStatusButton = memo(function AgentAutoNextStatusButton({
+  agentId,
+  serverId,
+}: AgentStatusBarProps) {
+  const autoNext = useSessionStore(
+    (state) => state.sessions[serverId]?.autoNextByAgent.get(agentId) ?? DEFAULT_AUTO_NEXT_SETTINGS,
+  );
+  const setAgentAutoNext = useSessionStore((state) => state.setAgentAutoNext);
+  const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
+
+  return (
+    <AgentAutoNextControl
+      settings={autoNext}
+      disabled={!client}
+      onChange={(updates) => {
+        setAgentAutoNext(serverId, agentId, updates);
+      }}
+    />
+  );
+});
+
 const EMPTY_MODES: AgentMode[] = [];
 
 export const AgentStatusBar = memo(function AgentStatusBar({
@@ -1037,27 +1242,24 @@ export const AgentStatusBar = memo(function AgentStatusBar({
     (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b),
   );
   const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
-  const autoNext = useSessionStore(
-    (state) => state.sessions[serverId]?.autoNextByAgent.get(agentId) ?? DEFAULT_AUTO_NEXT_SETTINGS,
-  );
-  const setAgentAutoNext = useSessionStore((state) => state.setAgentAutoNext);
   const toast = useToast();
 
   const {
     entries: snapshotEntries,
     isLoading: snapshotIsLoading,
+    refresh: refreshProvidersSnapshot,
     refetchIfStale: refetchSnapshotIfStale,
-  } = useProvidersSnapshot(serverId);
+  } = useProvidersSnapshot(serverId, agent?.cwd);
 
-  const snapshotSelectedEntry = useMemo(() => {
+  const snapshotModels = useMemo(() => {
     if (!snapshotEntries || !agent?.provider) {
       return null;
     }
-    return snapshotEntries.find((e) => e.provider === agent.provider) ?? null;
+    const entry = snapshotEntries.find((e) => e.provider === agent.provider);
+    return entry?.models ?? null;
   }, [snapshotEntries, agent?.provider]);
 
-  const models = snapshotSelectedEntry?.models ?? null;
-  const selectedProviderIsLoading = snapshotSelectedEntry?.status === "loading";
+  const models = snapshotModels;
 
   const agentProviderDefinitions = useMemo(() => {
     const definition = agent?.provider
@@ -1068,11 +1270,11 @@ export const AgentStatusBar = memo(function AgentStatusBar({
 
   const agentProviderModels = useMemo(() => {
     const map = new Map<string, AgentModelDefinition[]>();
-    if (agent?.provider && models) {
-      map.set(agent.provider, models);
+    if (agent?.provider && snapshotModels) {
+      map.set(agent.provider, snapshotModels);
     }
     return map;
-  }, [agent?.provider, models]);
+  }, [agent?.provider, snapshotModels]);
 
   const displayMode =
     availableModes.find((mode) => mode.id === agent?.currentModeId)?.label ||
@@ -1110,6 +1312,26 @@ export const AgentStatusBar = memo(function AgentStatusBar({
       label: option.label,
     }));
   }, [modelSelection.thinkingOptions]);
+
+  const handleModelSelectorOpen = useCallback(() => {
+    if (!agent?.provider) {
+      refetchSnapshotIfStale();
+      return;
+    }
+
+    const selectedEntry = snapshotEntries?.find((entry) => entry.provider === agent.provider);
+    const shouldWarmSelectedProvider =
+      !selectedEntry ||
+      selectedEntry.status !== "ready" ||
+      (selectedEntry.models?.length ?? 0) === 0;
+
+    if (shouldWarmSelectedProvider) {
+      void refreshProvidersSnapshot([agent.provider]);
+      return;
+    }
+
+    refetchSnapshotIfStale();
+  }, [agent?.provider, refetchSnapshotIfStale, refreshProvidersSnapshot, snapshotEntries]);
 
   if (!agent) {
     return null;
@@ -1217,17 +1439,10 @@ export const AgentStatusBar = memo(function AgentStatusBar({
             toast.error(toErrorMessage(error));
           });
         }}
-        isModelLoading={snapshotIsLoading || selectedProviderIsLoading}
-        onModelSelectorOpen={() => refetchSnapshotIfStale(agent?.provider)}
+        isModelLoading={snapshotIsLoading}
+        onModelSelectorOpen={handleModelSelectorOpen}
         onDropdownClose={onDropdownClose}
         disabled={!client}
-      />
-      <AgentAutoNextControl
-        settings={autoNext}
-        disabled={!client}
-        onChange={(updates) => {
-          setAgentAutoNext(serverId, agentId, updates);
-        }}
       />
     </View>
   );
@@ -1282,46 +1497,41 @@ export function DraftAgentStatusBar({
   const effectiveSelectedMode = selectedMode || mappedModeOptions[0]?.id || "";
   const effectiveSelectedThinkingOption =
     selectedThinkingOptionId || mappedThinkingOptions[0]?.id || undefined;
-  const hasSelectedProvider = selectedProvider !== null;
 
   if (platformIsWeb) {
+    const mappedProviderOptions: StatusOption[] = providerDefinitions.map((definition) => ({
+      id: definition.id,
+      label: definition.label,
+    }));
+    const mappedModelOptions: StatusOption[] = models.map((model) => ({
+      id: model.id,
+      label: model.label,
+    }));
+
     return (
       <View style={styles.container}>
-        <CombinedModelSelector
+        <ControlledStatusBar
+          provider={selectedProvider}
+          providerOptions={mappedProviderOptions}
+          selectedProviderId={selectedProvider}
+          onSelectProvider={(providerId) => onSelectProvider(providerId as AgentProvider)}
           providerDefinitions={providerDefinitions}
-          allProviderModels={allProviderModels}
-          selectedProvider={selectedProvider ?? ""}
-          selectedModel={selectedModel}
-          onSelect={onSelectProviderAndModel}
-          favoriteKeys={favoriteKeys}
-          onToggleFavorite={(provider, modelId) => {
-            void updatePreferences((current) =>
-              toggleFavoriteModel({ preferences: current, provider, modelId }),
-            ).catch((error) => {
-              console.warn("[DraftAgentStatusBar] toggle favorite model failed", error);
-            });
-          }}
-          isLoading={isAllModelsLoading}
+          modeOptions={mappedModeOptions}
+          selectedModeId={effectiveSelectedMode}
+          onSelectMode={onSelectMode}
+          modelOptions={mappedModelOptions}
+          selectedModelId={selectedModel}
+          onSelectModel={onSelectModel}
+          thinkingOptions={mappedThinkingOptions.length > 0 ? mappedThinkingOptions : undefined}
+          selectedThinkingOptionId={effectiveSelectedThinkingOption}
+          onSelectThinkingOption={onSelectThinkingOption}
+          features={features}
+          onSetFeature={onSetFeature}
+          onDropdownClose={onDropdownClose}
+          onModelSelectorOpen={onModelSelectorOpen}
+          isModelLoading={isAllModelsLoading}
           disabled={disabled}
-          onOpen={onModelSelectorOpen}
-          onClose={onDropdownClose}
         />
-        {selectedProvider ? (
-          <ControlledStatusBar
-            provider={selectedProvider}
-            providerDefinitions={providerDefinitions}
-            modeOptions={mappedModeOptions}
-            selectedModeId={effectiveSelectedMode}
-            onSelectMode={onSelectMode}
-            thinkingOptions={mappedThinkingOptions.length > 0 ? mappedThinkingOptions : undefined}
-            selectedThinkingOptionId={effectiveSelectedThinkingOption}
-            onSelectThinkingOption={onSelectThinkingOption}
-            features={features}
-            onSetFeature={onSetFeature}
-            onDropdownClose={onDropdownClose}
-            disabled={disabled}
-          />
-        ) : null}
       </View>
     );
   }
@@ -1334,10 +1544,10 @@ export function DraftAgentStatusBar({
   return (
     <>
       <ControlledStatusBar
-        provider={selectedProvider ?? ""}
+        provider={selectedProvider}
         providerDefinitions={providerDefinitions}
         allProviderModels={allProviderModels}
-        modeOptions={hasSelectedProvider ? mappedModeOptions : undefined}
+        modeOptions={mappedModeOptions}
         selectedModeId={effectiveSelectedMode}
         onSelectMode={onSelectMode}
         modelOptions={modelOptions}
@@ -1366,9 +1576,21 @@ export function DraftAgentStatusBar({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  stack: {
+    minWidth: 0,
+    maxWidth: "100%",
+    gap: theme.spacing[1],
+  },
   container: {
     flexDirection: "row",
     alignItems: "flex-end",
+    flexWrap: "wrap",
+    maxWidth: "100%",
+    gap: theme.spacing[1],
+  },
+  secondaryRow: {
+    flexDirection: "row",
+    alignItems: "center",
     gap: theme.spacing[1],
   },
   modeBadge: {
@@ -1379,6 +1601,11 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
     paddingHorizontal: theme.spacing[2],
     borderRadius: theme.borderRadius["2xl"],
+  },
+  modelBadge: {
+    minWidth: 140,
+    maxWidth: 260,
+    flexShrink: 1,
   },
   modeIconBadge: {
     width: 28,
@@ -1461,8 +1688,108 @@ const styles = StyleSheet.create((theme) => ({
   autoNextButtonEnabled: {
     backgroundColor: theme.colors.surface2,
   },
+  autoNextToolbarButton: {
+    height: 28,
+    minWidth: 64,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+    borderRadius: theme.borderRadius.full,
+    borderWidth: 1,
+    borderColor: theme.colors.surface3,
+    backgroundColor: theme.colors.surface1,
+  },
+  autoNextSplitButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  autoNextToolbarMainButton: {
+    minWidth: 72,
+  },
+  autoNextToolbarChevronButton: {
+    minWidth: 28,
+    width: 28,
+    paddingHorizontal: 0,
+  },
+  autoNextToolbarButtonHovered: {
+    backgroundColor: theme.colors.surface2,
+  },
+  autoNextToolbarButtonPressed: {
+    backgroundColor: theme.colors.surface0,
+  },
+  autoNextToolbarText: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.semibold,
+  },
+  planModeInlineToggleContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  planModeInlineActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  planModeInlineOption: {
+    minWidth: 42,
+    height: 28,
+    paddingHorizontal: theme.spacing[2],
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.colors.surface1,
+    borderRadius: theme.borderRadius.full,
+    borderWidth: 1,
+    borderColor: theme.colors.surface3,
+  },
+  planModeInlineOptionActive: {
+    backgroundColor: theme.colors.surface2,
+    borderColor: theme.colors.surface4,
+  },
+  planModeInlineOptionHovered: {
+    backgroundColor: theme.colors.surface2,
+  },
+  planModeInlineOptionPressed: {
+    backgroundColor: theme.colors.surface0,
+  },
+  planModeInlineText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.xs,
+    fontWeight: theme.fontWeight.semibold,
+  },
+  planModeInlineTextActive: {
+    color: theme.colors.foreground,
+  },
   autoNextField: {
     gap: theme.spacing[2],
+  },
+  autoNextMenuField: {
+    gap: theme.spacing[1],
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[2],
+    paddingBottom: theme.spacing[1],
+  },
+  autoNextMenuFieldLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.xs,
+    fontWeight: theme.fontWeight.medium,
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  autoNextMenuInput: {
+    minHeight: 34,
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.surface3,
+    backgroundColor: theme.colors.surface0,
+    color: theme.colors.foreground,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    fontSize: theme.fontSize.sm,
   },
   autoNextFieldLabel: {
     color: theme.colors.foregroundMuted,
